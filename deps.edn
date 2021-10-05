@@ -1,0 +1,23 @@
+{:paths ["src"]
+ :deps {com.h2database/h2 {:mvn/version "1.4.200"}
+        com.microsoft.sqlserver/mssql-jdbc {:mvn/version "9.1.1.jre8-preview"}
+        io.replikativ/konserve {:mvn/version "0.6.0-alpha1"}
+        mysql/mysql-connector-java {:mvn/version "8.0.20"}
+        org.apache.derby/derby {:mvn/version "10.14.2.0"}
+        org.clojure/clojure {:mvn/version "1.10.2-alpha1"}
+        org.postgresql/postgresql {:mvn/version "42.2.12"}
+        org.xerial/sqlite-jdbc {:mvn/version "3.23.1"}
+        seancorfield/next.jdbc {:mvn/version "1.2.659"}}
+ :aliases {:dev {:extra-deps {metosin/malli {:mvn/version "0.5.1"}}}
+           :test {:extra-deps {lambdaisland/kaocha {:mvn/version "1.0.641"}
+                               metosin/malli {:mvn/version "0.5.1"}}
+                  :extra-paths ["test"]}
+           :jar {:extra-deps {seancorfield/depstar {:mvn/version "1.1.116"}}
+                 :main-opts ["-m" "hf.depstar.jar" "replikativ-konserve-jdbc.jar"]}
+           :deploy {:extra-deps {deps-deploy/deps-deploy {:mvn/version "0.0.9"}}
+                    :main-opts ["-m" "deps-deploy.deps-deploy" "deploy" "replikativ-konserve-jdbc.jar"]}
+           :format {:extra-deps {cljfmt/cljfmt {:mvn/version "0.7.0"}}
+                    :main-opts ["-m" "cljfmt.main" "check"]}
+           :ffix {:extra-deps {cljfmt/cljfmt {:mvn/version "0.7.0"}}
+                  :main-opts ["-m" "cljfmt.main" "fix"]}}}
+
