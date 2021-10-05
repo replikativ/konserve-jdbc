@@ -4,57 +4,15 @@ A [JDBC](https://github.com/clojure/java.jdbc) backend for [konserve](https://gi
 
 ## Status
 
-![master](https://github.com/alekcz/konserve-jdbc/workflows/master/badge.svg) [![codecov](https://codecov.io/gh/alekcz/konserve-jdbc/branch/master/graph/badge.svg)](https://codecov.io/gh/alekcz/konserve-jdbc) [![Dependencies Status](https://versions.deps.co/alekcz/konserve-jdbc/status.svg)](https://versions.deps.co/alekcz/konserve-jdbc)
+_Under construction_
 
-## Usage
+Recently forked from https://github.com/alekcz/konserve-jdbc.
 
-[![Clojars Project](https://img.shields.io/clojars/v/alekcz/konserve-jdbc.svg)](https://clojars.org/alekcz/konserve-jdbc)
-
-`[alekcz/konserve-jdbc "0.1.0-SNAPSHOT"]`
-
-```clojure
-(require '[konserve-jdbc.core :refer [new-jdbc-store]]
-         '[clojure.core.async :refer [<!!] :as async]
-         '[konserve.core :as k])
-  
-  (def h2 { :dbtype "h2"
-            :dbname "./temp/konserve;DB_CLOSE_ON_EXIT=FALSE"
-            :user "sa"
-            :password ""})
-  
-  (def mysql { :dbtype "mysql"
-               :dbname "konserve"
-               :host "localhost"
-               :user "konserve"
-               :password "password"})
-
-  (def pg { :dbtype "postgresql"
-            :dbname "konserve"
-            :host "localhost"
-            :user "konserve"
-            :password "password"})
-
-  (def h2-store (<!! (new-jdbc-store h2 :table "konserve")))
-  (def mysql-store (<!! (new-jdbc-store mysql :table "konserve")))
-  (def pg-store (<!! (new-jdbc-store pg :table "konserve")))
-
-  (<!! (k/exists? pg-store :cecilia)) ; => false
-  (<!! (k/get-in pg-store [:cecilia])) ; => nil
-  (<!! (k/assoc pg-store :cecilia {:name "cecilia"})) 
-  (<!! (k/assoc-in pg-store [:cecilia :age] 28))
-  (<!! (k/get-in pg-store [:cecilia :age])) ; => 28
-  (<!! (k/update-in pg-store [:cecilia :age] inc))
-  (<!! (k/get pg-store :cecilia)) ; => {:name "cecilia", :age 29}
-
-
-  (defrecord Test [a])
-  (<!! (k/assoc pg-store :agatha (Test. 35)))
-  (<!! (k/get pg-store :agatha))
-```
+Update to new konserve framework  in progress...
 
 ## License
 
-Copyright © 2020 Alexander Oloo
+Copyright © 2021 Alexander Oloo, Judith Massa
 
 This program and the accompanying materials are made available under the
 terms of the Eclipse Public License 2.0 which is available at
