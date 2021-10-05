@@ -11,7 +11,7 @@
                  [mysql/mysql-connector-java "8.0.20"]
                  [org.postgresql/postgresql "42.2.12"]
                  [org.xerial/sqlite-jdbc "3.23.1"]
-                 [io.replikativ/konserve "0.6.0-alpha1"]
+                 [io.replikativ/konserve "0.6.0-alpha3"]
                  [com.microsoft.sqlserver/mssql-jdbc "9.1.1.jre8-preview"]]
   :repl-options {:init-ns konserve-jdbc.core}
   :plugins [[lein-cloverage "1.2.2"]]
