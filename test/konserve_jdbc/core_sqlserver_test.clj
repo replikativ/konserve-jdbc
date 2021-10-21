@@ -1,11 +1,11 @@
-(ns konserve-jdbc.core-mssql-test
+(ns konserve-jdbc.core-sqlserver-test
   (:require [clojure.test :refer [deftest is testing use-fixtures]]
             [clojure.core.async :refer [<!!]]
             [konserve.compliance-test :refer [compliance-test]]
             [konserve-jdbc.core :refer [connect-jdbc-store delete-store]]))
 
 (def db-spec
-  {:dbtype "mssql"
+  {:dbtype "sqlserver"
    :dbname "tempdb"
    :host "localhost"
    :user "sa"
@@ -19,7 +19,7 @@
     (delete-store db-spec :opts {:sync? true})))
 
 (deftest jdbc-compliance-async-test
-  (let [_ (<!! (delete-store db-spec :table "compliance_test"  :opts {:sync? false}))
+  (let [_ (<!! (delete-store db-spec :table "compliance_test" :opts {:sync? false}))
         store (<!! (connect-jdbc-store db-spec :table "compliance_test" :opts {:sync? false}))]
     (testing "Compliance test with asynchronous store"
       (compliance-test store))

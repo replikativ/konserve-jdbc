@@ -1,12 +1,14 @@
 {:paths ["src"]
  :deps {com.h2database/h2 {:mvn/version "1.4.200"}
-        com.microsoft.sqlserver/mssql-jdbc {:mvn/version "9.1.1.jre8-preview"}
-        io.replikativ/konserve {:mvn/version "0.6.0-alpha1"}
-        mysql/mysql-connector-java {:mvn/version "8.0.20"}
-        org.apache.derby/derby {:mvn/version "10.14.2.0"}
+        com.microsoft.sqlserver/mssql-jdbc {:mvn/version "9.4.0.jre11"}
+        com.taoensso/timbre {:mvn/version "5.1.2"}
+        io.replikativ/konserve {:mvn/version "0.6.0-SNAPSHOT"}
+        io.replikativ/superv.async {:mvn/version "0.2.11"}
+        mysql/mysql-connector-java {:mvn/version "8.0.25"}
+        org.apache.derby/derby {:mvn/version "10.15.2.0"}
         org.clojure/clojure {:mvn/version "1.10.2-alpha1"}
-        org.postgresql/postgresql {:mvn/version "42.2.12"}
-        org.xerial/sqlite-jdbc {:mvn/version "3.23.1"}
+        org.postgresql/postgresql {:mvn/version "42.2.24.jre7"}
+        org.xerial/sqlite-jdbc {:mvn/version "3.36.0.2"}
         seancorfield/next.jdbc {:mvn/version "1.2.659"}}
  :aliases {:dev {:extra-deps {metosin/malli {:mvn/version "0.5.1"}}}
            :test {:extra-deps {lambdaisland/kaocha {:mvn/version "1.0.641"}
