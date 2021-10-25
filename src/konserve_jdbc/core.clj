@@ -19,7 +19,6 @@
 (def ^:const dbtypes ["h2" "h2:mem" "hsqldb" "jtds:sqlserver" "mysql" "oracle:oci" "oracle:thin" "postgresql" "redshift" "sqlite" "sqlserver" "mssql"])
 (def ^:const supported-dbtypes #{"h2" "mysql" "postgresql" "sqlite" "sqlserver" "mssql"})
 
-
 (defn extract-bytes [obj dbtype]
   (when obj
     (case dbtype
@@ -86,7 +85,7 @@
           "WHEN MATCHED THEN UPDATE "
           "SET tgt.header = new.header, tgt.meta = new.meta, tgt.value = new.value "
           "WHEN NOT MATCHED THEN "
-          "INSERT (id, header, meta, value) VALUES (new.id, new.header, new.meta, new.value);" )]
+          "INSERT (id, header, meta, value) VALUES (new.id, new.header, new.meta, new.value);")]
     "mysql"
     [(str "REPLACE INTO " table " (id, header, meta, value) "
           "SELECT '" to "', header, meta, value FROM " table  " WHERE id = '" from "';")]
@@ -97,7 +96,7 @@
           "WHEN MATCHED THEN UPDATE "
           "SET tgt.header = new.header, tgt.meta = new.meta, tgt.value = new.value "
           "WHEN NOT MATCHED THEN "
-          "INSERT (id, header, meta, value) VALUES (new.id, new.header, new.meta, new.value);" )]))
+          "INSERT (id, header, meta, value) VALUES (new.id, new.header, new.meta, new.value);")]))
 
 (defn delete-statement [db-type table]
   (case db-type
@@ -124,8 +123,6 @@
         (locked-cb {:input-stream (when res (ByteArrayInputStream. (extract-bytes res db-type)))
                     :size nil})
         (extract-bytes res db-type)))))
-
-
 
 (extend-protocol PBackingLock
   Boolean
@@ -204,7 +201,6 @@
                      (not (nil? (first res))))))))
   (-copy [this from to env]
     (let [db-type (or (:dbtype db-spec) (:subprotocol db-spec))]
-      (println "copy" (copy-row-statement db-type table to from))
       (async+sync (:sync? env) *default-sync-translation*
                   (go-try- (jdbc/execute! datasource (copy-row-statement db-type table to from))))))
   (-atomic-move [this from to env]
@@ -246,12 +242,12 @@
                        :buffer-size        (* 1024 1024)}
                       (dissoc params :table :opts :config))
         db-type (or (:dbtype db-spec) (:subprotocol db-spec))]
-      (when-not db-type
-        (throw (ex-info ":dbtype must be explicitly declared" {:options dbtypes})))
-      (when-not (supported-dbtypes db-type)
-        (warn "Unsupported database type " db-type
-              " - full functionality of store is only guaranteed for following database types: "  supported-dbtypes))
-      (new-default-store table backing nil nil nil config))) ;; uses async+sync macro
+    (when-not db-type
+      (throw (ex-info ":dbtype must be explicitly declared" {:options dbtypes})))
+    (when-not (supported-dbtypes db-type)
+      (warn "Unsupported database type " db-type
+            " - full functionality of store is only guaranteed for following database types: "  supported-dbtypes))
+    (new-default-store table backing nil nil nil config))) ;; uses async+sync macro
 
 (defn delete-store [db-spec & {:keys [table opts] :or {table default-table}}]
   (let [complete-opts (merge {:sync? true}
@@ -262,17 +258,13 @@
     (-delete-store backing complete-opts)))
 
 (comment
-
-  (require '[konserve.core :as k])
-  (import  '[java.io File])
-
   (def db-spec
     (let [dir "devh2"]
       (.mkdirs (File. dir))
-    {:dbtype   "h2"
-     :dbname   (str"./" dir "/konserve;DB_CLOSE_ON_EXIT=FALSE")
-     :user     "sa"
-     :password ""}))
+      {:dbtype   "h2"
+       :dbname   (str "./" dir "/konserve;DB_CLOSE_ON_EXIT=FALSE")
+       :user     "sa"
+       :password ""}))
 
   (def db-spec
     {:dbtype "mssql"
@@ -295,18 +287,23 @@
      :user "konserve"
      :password "password"})
 
- (def db-spec
-   (let [dir "devsql"]
-    (.mkdirs (File. dir))
-    {:dbtype   "sqlite"
-     :dbname   (str "./" dir "/konserve")}))
+  (def db-spec
+    (let [dir "devsql"]
+      (.mkdirs (File. dir))
+      {:dbtype   "sqlite"
+       :dbname   (str "./" dir "/konserve")}))
 
   (def db-spec
     {:dbtype "sqlserver"
      :dbname "tempdb"
      :host "localhost"
      :user "sa"
-     :password "passwordA1!"})
+     :password "passwordA1!"}))
+
+(comment
+
+  (require '[konserve.core :as k])
+  (import  '[java.io File])
 
   (delete-store db-spec :opts {:sync? true})
 
@@ -329,34 +326,12 @@
   (k/bassoc store :binbar (byte-array (range 10)) {:sync? true})
   (k/bget store :binbar (fn [{:keys [input-stream]}]
                           (map byte (slurp input-stream)))
-          {:sync? true})
+          {:sync? true}))
+
+(comment
 
   (require '[konserve.core :as k])
   (require '[clojure.core.async :refer [<!!]])
-
-  (def db-spec
-    {:dbtype   "h2"
-     :dbname   "./temph2/konserve;DB_CLOSE_ON_EXIT=FALSE"
-     :user     "sa"
-     :password ""})
-
-  (def db-spec
-    {:dbtype "mssql"
-     :dbname "tempdb"
-     :host "localhost"
-     :user "sa"
-     :password "passwordA1!"})
-
-  (def db-spec
-    {:dbtype "postgresql"
-     :dbname "konserve"
-     :host "localhost"
-     :user "konserve"
-     :password "password"})
-
-  (def db-spec
-    {:dbtype "sqlite"
-     :dbname "tmp/sql/konserve"})
 
   (<!! (delete-store db-spec :opts {:sync? false}))
 
