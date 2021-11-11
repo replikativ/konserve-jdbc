@@ -1,302 +1,357 @@
 (ns konserve-jdbc.core
   "Address globally aggregated immutable key-value stores(s)."
-  (:require [clojure.core.async :as async]
-            [konserve.serializers :as ser]
-            [konserve.compressor :as comp]
-            [konserve.encryptor :as encr]
-            [hasch.core :as hasch]
-            [konserve-jdbc.io :as io]
+  (:require [konserve.impl.default :refer [new-default-store]]
+            [konserve.impl.storage-layout :refer [PBackingStore PBackingBlob PBackingLock -delete-store]]
+            [konserve.compressor :refer [null-compressor]]
+            [konserve.encryptor :refer [null-encryptor]]
+            [konserve.utils :refer [async+sync *default-sync-translation*]]
+            [superv.async :refer [go-try- <?-]]
+            [clojure.core.async :refer [go <!! chan close! put!]]
             [next.jdbc :as jdbc]
-            [konserve.protocols :refer [PEDNAsyncKeyValueStore
-                                        -exists? -get -get-meta
-                                        -update-in -assoc-in -dissoc
-                                        PBinaryAsyncKeyValueStore
-                                        -bassoc -bget
-                                        -serialize -deserialize
-                                        PKeyIterable
-                                        -keys]]
-            [konserve.storage-layout :refer [SplitLayout]])
-  (:import  [java.io ByteArrayOutputStream]))
+            [next.jdbc.result-set :as rs]
+            [taoensso.timbre :refer [warn]])
+  (:import [java.sql Blob]
+           (java.io ByteArrayInputStream)))
 
 (set! *warn-on-reflection* 1)
-(def dbtypes ["h2" "h2:mem" "hsqldb" "jtds:sqlserver" "mysql" "oracle:oci" "oracle:thin" "postgresql" "redshift" "sqlite" "sqlserver" "mssql"])
-(def store-layout 1)
 
-(defn str-uuid 
-  [key] 
-  (str (hasch/uuid key))) 
+(def ^:const default-table "konserve")
+(def ^:const dbtypes ["h2" "h2:mem" "hsqldb" "jtds:sqlserver" "mysql" "oracle:oci" "oracle:thin" "postgresql" "redshift" "sqlite" "sqlserver" "mssql"])
+(def ^:const supported-dbtypes #{"h2" "mysql" "postgresql" "sqlite" "sqlserver" "mssql"})
 
-(defn prep-ex 
-  [^String message ^Exception e]
-  ; (.printStackTrace e)
-  (ex-info message {:error (.getMessage e) :cause (.getCause e) :trace (.getStackTrace e)}))
+(defn extract-bytes [obj dbtype]
+  (when obj
+    (case dbtype
+      "h2" (.getBytes ^Blob obj 0 (.length ^Blob obj))
+      obj)))
 
-(defn prep-stream 
-  [stream]
-  { :input-stream stream
-    :size nil})
+(defn create-statement [db-type table]
+  (case db-type
+    ("postgresql" "sqlite")
+    [(str "CREATE TABLE IF NOT EXISTS " table " (id varchar(100) primary key, header bytea, meta bytea, value bytea)")]
+    ("mssql" "sqlserver")
+    [(str "IF OBJECT_ID(N'dbo." table "', N'U') IS NULL "
+          "BEGIN "
+          "CREATE TABLE dbo." table " (id varchar(100) primary key, header varbinary(max), meta varbinary(max), value varbinary(max)); "
+          "END;")]
+    [(str "CREATE TABLE IF NOT EXISTS " table " (id varchar(100) primary key, header longblob, meta longblob, value longblob)")]))
 
-(defrecord JDBCStore [conn default-serializer serializers compressor encryptor read-handlers write-handlers locks]
-  PEDNAsyncKeyValueStore
-  (-exists? 
-    [this key] 
-      (let [res-ch (async/chan 1)]
-        (async/thread
-          (try
-            (async/put! res-ch (io/it-exists? conn (str-uuid key)))
-            (catch Exception e (async/put! res-ch (prep-ex "Failed to determine if item exists" e)))))
-        res-ch))
+(defn update-statement [db-type table id header meta value]
+  (case db-type
+    "h2"
+    [(str "MERGE INTO " table " (id, header, meta, value) VALUES (?, ?, ?, ?);")
+     id header meta value]
+    ("postgresql" "sqlite")                                          ;
+    [(str "INSERT INTO " table " (id, header, meta, value) VALUES (?, ?, ?, ?) "
+          "ON CONFLICT (id) DO UPDATE "
+          "SET header = excluded.header, meta = excluded.meta, value = excluded.value;")
+     id header meta value]
+    ("mssql" "sqlserver")
+    [(str "MERGE dbo." table " WITH (HOLDLOCK) AS tgt "
+          "USING (VALUES (?, ?, ?, ?)) AS new (id, header, meta, value) "
+          "ON tgt.id = new.id "
+          "WHEN MATCHED THEN UPDATE "
+          "SET tgt.header = new.header, tgt.meta = new.meta, tgt.value = new.value "
+          "WHEN NOT MATCHED THEN "
+          "INSERT (id, header, meta, value) VALUES (new.id, new.header, new.meta, new.value);")
+     id header meta value]
+    "mysql"
+    [(str "REPLACE INTO " table " (id, header, meta, value) VALUES (?, ?, ?, ?);")
+     id header meta value]
+    [(str "MERGE " table " AS tgt "
+          "USING (VALUES (?, ?, ?, ?)) AS new (id, header, meta, value) "
+          "ON tgt.id = new.id "
+          "WHEN MATCHED THEN UPDATE "
+          "SET tgt.header = new.header, tgt.meta = new.meta, tgt.value = new.value "
+          "WHEN NOT MATCHED THEN "
+          "INSERT (id, header, meta, value) VALUES (new.id, new.header, new.meta, new.value);")
+     id header meta value]))
 
-  (-get 
-    [this key] 
-    (let [res-ch (async/chan 1)]
-      (async/thread
-        (try
-          (let [[header res] (io/get-it-only conn (str-uuid key))]
-            (if (some? res) 
-              (let [rserializer (ser/byte->serializer (get header 1))
-                    rcompressor (comp/byte->compressor (get header 2))
-                    rencryptor  (encr/byte->encryptor  (get header 3))
-                    reader (-> rserializer rencryptor rcompressor)
-                    data (-deserialize reader read-handlers res)]
-                (async/put! res-ch data))
-              (async/close! res-ch)))
-          (catch Exception e (async/put! res-ch (prep-ex "Failed to retrieve value from store" e)))))
-      res-ch))
+(defn copy-row-statement [db-type table to from]
+  (case db-type
+    "h2"
+    [(str "MERGE INTO " table " (id, header, meta, value) "
+          "SELECT '" to "', header, meta, value FROM " table "  WHERE id = '" from "';")]
+    ("postgresql" "sqlite")
+    [(str "INSERT INTO " table " (id, header, meta, value) "
+          "SELECT '" to "', header, meta, value FROM " table "  WHERE id = '" from "' "
+          "ON CONFLICT (id) DO UPDATE "
+          "SET header = excluded.header, meta = excluded.meta, value = excluded.value;")]
+    ("mssql" "sqlserver")
+    [(str "MERGE dbo." table " WITH (HOLDLOCK) AS tgt "
+          "USING (SELECT '" to "', header, meta, value FROM " table " WHERE id = '" from "') "
+          "AS new (id, header, meta, value) "
+          "ON (tgt.id = new.id)"
+          "WHEN MATCHED THEN UPDATE "
+          "SET tgt.header = new.header, tgt.meta = new.meta, tgt.value = new.value "
+          "WHEN NOT MATCHED THEN "
+          "INSERT (id, header, meta, value) VALUES (new.id, new.header, new.meta, new.value);")]
+    "mysql"
+    [(str "REPLACE INTO " table " (id, header, meta, value) "
+          "SELECT '" to "', header, meta, value FROM " table  " WHERE id = '" from "';")]
+    [(str "MERGE INTO " table " AS tgt "
+          "USING (SELECT '" to "', header, meta, value FROM " table " WHERE id = '" from "') "
+          "AS new (id, header, meta, value) "
+          "ON (tgt.id = new.id)"
+          "WHEN MATCHED THEN UPDATE "
+          "SET tgt.header = new.header, tgt.meta = new.meta, tgt.value = new.value "
+          "WHEN NOT MATCHED THEN "
+          "INSERT (id, header, meta, value) VALUES (new.id, new.header, new.meta, new.value);")]))
 
-  (-get-meta 
-    [this key] 
-    (let [res-ch (async/chan 1)]
-      (async/thread
-        (try
-          (let [[header res] (io/get-meta conn (str-uuid key))]
-            (if (some? res) 
-              (let [rserializer (ser/byte->serializer (get header 1))
-                    rcompressor (comp/byte->compressor (get header 2))
-                    rencryptor  (encr/byte->encryptor  (get header 3))
-                    reader (-> rserializer rencryptor rcompressor)
-                    data (-deserialize reader read-handlers res)] 
-                (async/put! res-ch data))
-              (async/close! res-ch)))
-          (catch Exception e (async/put! res-ch (prep-ex "Failed to retrieve metadata from store" e)))))
-      res-ch))
+(defn delete-statement [db-type table]
+  (case db-type
+    ("mssql" "sqlserver")
+    [(str "IF OBJECT_ID(N'dbo." table "', N'U') IS NOT NULL "
+          "BEGIN DROP TABLE dbo." table "; "
+          "END;")]
+    [(str "DROP TABLE IF EXISTS " table)]))
 
-  (-update-in 
-    [this key-vec meta-up-fn up-fn args]
-    (let [res-ch (async/chan 1)]
-      (async/thread
-        (try
-          (let [[fkey & rkey] key-vec
-                [[mheader ometa'] [vheader oval']] (io/get-it conn (str-uuid fkey))
-                old-val [(when ometa'
-                            (let [mserializer (ser/byte->serializer  (get mheader 1))
-                                  mcompressor (comp/byte->compressor (get mheader 2))
-                                  mencryptor  (encr/byte->encryptor  (get mheader 3))
-                                  reader (-> mserializer mencryptor mcompressor)]
-                              (-deserialize reader read-handlers ometa')))
-                         (when oval'
-                            (let [vserializer (ser/byte->serializer  (get vheader 1))
-                                  vcompressor (comp/byte->compressor (get vheader 2))
-                                  vencryptor  (encr/byte->encryptor  (get vheader 3))
-                                  reader (-> vserializer vencryptor vcompressor)]
-                              (-deserialize reader read-handlers oval')))]            
-                [nmeta nval] [(meta-up-fn (first old-val)) 
-                              (if rkey (apply update-in (second old-val) rkey up-fn args) (apply up-fn (second old-val) args))]
-                serializer (get serializers default-serializer)
-                writer (-> serializer compressor encryptor)
-                ^ByteArrayOutputStream mbaos (ByteArrayOutputStream.)
-                ^ByteArrayOutputStream vbaos (ByteArrayOutputStream.)]
-            (when nmeta 
-              (.write mbaos ^byte store-layout)
-              (.write mbaos ^byte (ser/serializer-class->byte (type serializer)))
-              (.write mbaos ^byte (comp/compressor->byte compressor))
-              (.write mbaos ^byte (encr/encryptor->byte encryptor))
-              (-serialize writer mbaos write-handlers nmeta))
-            (when nval 
-              (.write vbaos ^byte store-layout)
-              (.write vbaos ^byte (ser/serializer-class->byte (type serializer)))
-              (.write vbaos ^byte (comp/compressor->byte compressor))
-              (.write vbaos ^byte (encr/encryptor->byte encryptor))
-              (-serialize writer vbaos write-handlers nval))    
-            (if (first old-val)
-              (io/update-it conn (str-uuid fkey) [(.toByteArray mbaos) (.toByteArray vbaos)])
-              (io/insert-it conn (str-uuid fkey) [(.toByteArray mbaos) (.toByteArray vbaos)]))
-            (async/put! res-ch [(second old-val) nval]))
-          (catch Exception e (async/put! res-ch (prep-ex "Failed to update/write value in store" e)))))
-        res-ch))
+(defn change-row-id [datasource table from to]
+  (with-open [conn (jdbc/get-connection datasource)]
+    (jdbc/execute! conn
+                   ["UPDATE " table " SET id = '" to "' WHERE id = '" from "';"])))
 
-  (-assoc-in [this key-vec meta val] (-update-in this key-vec meta (fn [_] val) []))
+(defn read-field [table id column & {:keys [binary? locked-cb] :or {binary? false}}]
+  (with-open [conn (jdbc/get-connection (:datasource table))]
+    (let [res (-> (jdbc/execute! conn
+                                 [(str "SELECT id," (name column) " FROM " (:table table) " WHERE id = '" id "';")]
+                                 {:builder-fn rs/as-unqualified-lower-maps})
+                  first
+                  column)
+          db-type (-> table :db-spec :dbtype)]
+      (if binary?
+        (locked-cb {:input-stream (when res (ByteArrayInputStream. (extract-bytes res db-type)))
+                    :size nil})
+        (extract-bytes res db-type)))))
 
-  (-dissoc 
-    [this key] 
-    (let [res-ch (async/chan 1)]
-      (async/thread
-        (try
-          (io/delete-it conn (str-uuid key))
-          (async/close! res-ch)
-          (catch Exception e (async/put! res-ch (prep-ex "Failed to delete key-value pair from store" e)))))
-        res-ch))
+(extend-protocol PBackingLock
+  Boolean
+  (-release [this env]
+    (if (:sync? env) nil (go-try- nil))))
 
-  PBinaryAsyncKeyValueStore
-  (-bget 
-    [this key locked-cb]
-    (let [res-ch (async/chan 1)]
-      (async/thread
-        (try
-          (let [[header res] (io/get-it-only conn (str-uuid key))]
-            (if (some? res) 
-              (let [rserializer (ser/byte->serializer (get header 1))
-                    rcompressor (comp/byte->compressor (get header 2))
-                    rencryptor  (encr/byte->encryptor  (get header 3))
-                    reader (-> rserializer rencryptor rcompressor)
-                    data (-deserialize reader read-handlers res)]
-                (async/put! res-ch (locked-cb (prep-stream data))))
-              (async/close! res-ch)))
-          (catch Exception e (async/put! res-ch (prep-ex "Failed to retrieve binary value from store" e)))))
-      res-ch))
+(defrecord JDBCRow [table key data]
+  PBackingBlob
+  (-sync [this env]
+    (if (:sync? env) nil (go-try- nil)))
+  (-close [this env]
+    (async+sync (:sync? env) *default-sync-translation*
+                (go-try-
+                 (let [db-type (or (:dbtype (:db-spec table)) (:subprotocol (:db-spec table)))
+                       {:keys [header meta value]} @data]
+                   (when (and header meta value)
+                     (with-open [conn (jdbc/get-connection (:datasource table))]
+                       (with-open [ps (jdbc/prepare conn (update-statement db-type (:table table) key header meta value))]
+                         (jdbc/execute-one! ps))))
+                   (reset! data {})))))
+  (-get-lock [this env]
+    (if (:sync? env) true (go-try- true)))                       ;; May not return nil, otherwise eternal retries
+  (-read-header [this env]
+    (async+sync (:sync? env) *default-sync-translation*
+                (go-try-
+                 (read-field table key :header))))
+  (-read-meta [this meta-size env]
+    (async+sync (:sync? env) *default-sync-translation*
+                (go-try-
+                 (read-field table key :meta))))
+  (-read-value [this meta-size env]
+    (async+sync (:sync? env) *default-sync-translation*
+                (go-try-
+                 (read-field table key :value))))
+  (-read-binary [this meta-size locked-cb env]
+    (async+sync (:sync? env) *default-sync-translation*
+                (go-try-
+                 (read-field table key :value :binary? true :locked-cb locked-cb))))
+  (-write-header [this header env]
+    (async+sync (:sync? env) *default-sync-translation*
+                (go-try-
+                 (swap! data assoc :header header))))
+  (-write-meta [this meta env]
+    (async+sync (:sync? env) *default-sync-translation*
+                (go-try-
+                 (swap! data assoc :meta meta))))
+  (-write-value [this value meta-size env]
+    (async+sync (:sync? env) *default-sync-translation*
+                (go-try-
+                 (swap! data assoc :value value))))
+  (-write-binary [this meta-size blob env]
+    (async+sync (:sync? env) *default-sync-translation*
+                (go-try-
+                 (swap! data assoc :value blob)))))
 
-  (-bassoc 
-    [this key meta-up-fn input]
-    (let [res-ch (async/chan 1)]
-      (async/thread
-        (try
-          (let [[[mheader old-meta'] [_ old-val]] (io/get-it conn (str-uuid key))
-                old-meta (when old-meta' 
-                            (let [mserializer (ser/byte->serializer  (get mheader 1))
-                                  mcompressor (comp/byte->compressor (get mheader 2))
-                                  mencryptor  (encr/byte->encryptor  (get mheader 3))
-                                  reader (-> mserializer mencryptor mcompressor)]
-                              (-deserialize reader read-handlers old-meta')))           
-                new-meta (meta-up-fn old-meta) 
-                serializer (get serializers default-serializer)
-                writer (-> serializer compressor encryptor)
-                ^ByteArrayOutputStream mbaos (ByteArrayOutputStream.)
-                ^ByteArrayOutputStream vbaos (ByteArrayOutputStream.)]
-            (when new-meta 
-              (.write mbaos ^byte store-layout)
-              (.write mbaos ^byte (ser/serializer-class->byte (type serializer)))
-              (.write mbaos ^byte (comp/compressor->byte compressor))
-              (.write mbaos ^byte (encr/encryptor->byte encryptor))
-              (-serialize writer mbaos write-handlers new-meta))
-            (when input
-              (.write vbaos ^byte store-layout)
-              (.write vbaos ^byte (ser/serializer-class->byte (type serializer)))
-              (.write vbaos ^byte (comp/compressor->byte compressor))
-              (.write vbaos ^byte (encr/encryptor->byte encryptor))
-              (-serialize writer vbaos write-handlers input))  
-            (if old-meta
-              (io/update-it conn (str-uuid key) [(.toByteArray mbaos) (.toByteArray vbaos)])
-              (io/insert-it conn (str-uuid key) [(.toByteArray mbaos) (.toByteArray vbaos)]))
-            (async/put! res-ch [old-val input]))
-          (catch Exception e (async/put! res-ch (prep-ex "Failed to write binary value in store" e)))))
-        res-ch))
+(defrecord JDBCTable [db-spec datasource table]
+  PBackingStore
+  (-create-blob [this path env]
+    (async+sync (:sync? env) *default-sync-translation*
+                (go-try-
+                 (JDBCRow. this path (atom {})))))
+  (-delete [this path env]
+    (async+sync (:sync? env) *default-sync-translation*
+                (go-try-
+                 (jdbc/execute! datasource
+                                [(str "DELETE FROM " table " WHERE id = '" path "';")]))))
+  (-path [this store-key env]
+    (async+sync (:sync? env) *default-sync-translation*
+                (go-try- store-key)))                       ;; TODO: remove
+  (-exists [this path env]
+    (async+sync (:sync? env) *default-sync-translation*
+                (go-try-
+                 (with-open [conn (jdbc/get-connection datasource)]
+                   (let [res (jdbc/execute! conn
+                                            [(str "SELECT 1 FROM " table " WHERE id = '" path "';")])]
+                     (not (nil? (first res))))))))
+  (-copy [this from to env]
+    (let [db-type (or (:dbtype db-spec) (:subprotocol db-spec))]
+      (async+sync (:sync? env) *default-sync-translation*
+                  (go-try- (jdbc/execute! datasource (copy-row-statement db-type table to from))))))
+  (-atomic-move [this from to env]
+    (async+sync (:sync? env) *default-sync-translation*
+                (go-try- (change-row-id datasource table from to))))
+  (-create-store [this env]
+    (let [db-type (or (:dbtype db-spec) (:subprotocol db-spec))]
+      (async+sync (:sync? env) *default-sync-translation*
+                  (go-try- (jdbc/execute! datasource (create-statement db-type table))))))
+  (-sync-store [this env]
+    (if (:sync? env) nil (go-try- nil)))
+  (-delete-store [this env]
+    (let [db-type (or (:dbtype db-spec) (:subprotocol db-spec))]
+      (async+sync (:sync? env) *default-sync-translation*
+                  (go-try- (jdbc/execute! datasource (delete-statement db-type table))))))
+  (-keys [this path env]
+    (async+sync (:sync? env) *default-sync-translation*
+                (go-try-
+                 (with-open [conn (jdbc/get-connection datasource)]
+                   (let [res' (jdbc/execute! conn
+                                             [(str "SELECT id FROM " table ";")]
+                                             {:builder-fn rs/as-unqualified-lower-maps})]
+                     (map :id res')))))))
 
-  PKeyIterable
-  (-keys 
-    [_]
-    (let [res-ch (async/chan)]
-      (async/thread
-        (try
-          (let [key-stream (io/get-keys conn)
-                keys' (when key-stream
-                        (for [[header k] key-stream]
-                          (let [rserializer (ser/byte->serializer (get header 1))
-                                rcompressor (comp/byte->compressor (get header 2))
-                                rencryptor  (encr/byte->encryptor  (get header 3))
-                                reader (-> rserializer rencryptor rcompressor)]
-                            (-deserialize reader read-handlers k))))
-                keys (doall (map :key keys'))]
-            (doall
-              (map #(async/put! res-ch %) keys))
-            (async/close! res-ch)) 
-          (catch Exception e (async/put! res-ch (prep-ex "Failed to retrieve keys from store" e)))))
-        res-ch))
-        
-  SplitLayout      
-  (-get-raw-meta [this key]
-    (let [res-ch (async/chan 1)]
-      (async/thread
-        (try
-          (let [res (io/raw-get-meta conn (str-uuid key))]
-            (if res
-              (async/put! res-ch res)
-              (async/close! res-ch)))
-          (catch Exception e (async/put! res-ch (prep-ex "Failed to retrieve raw metadata from store" e)))))
-      res-ch))
-  (-put-raw-meta [this key blob]
-    (let [res-ch (async/chan 1)]
-      (async/thread
-        (try
-          (if (io/it-exists? conn (str-uuid key))
-            (io/raw-update-meta conn (str-uuid key) blob)
-            (io/raw-insert-meta conn (str-uuid key) blob))
-          (async/close! res-ch)
-          (catch Exception e (async/put! res-ch (prep-ex "Failed to write raw metadata to store" e)))))
-      res-ch))
-  (-get-raw-value [this key]
-    (let [res-ch (async/chan 1)]
-      (async/thread
-        (try
-          (let [res (io/raw-get-it-only conn (str-uuid key))]
-            (if res
-              (async/put! res-ch res)
-              (async/close! res-ch)))
-          (catch Exception e (async/put! res-ch (prep-ex "Failed to retrieve raw value from store" e)))))
-      res-ch))
-  (-put-raw-value [this key blob]
-    (let [res-ch (async/chan 1)]
-      (async/thread
-        (try
-          (if (io/it-exists? conn (str-uuid key))
-            (io/raw-update-it-only conn (str-uuid key) blob)
-            (io/raw-insert-it-only conn (str-uuid key) blob))
-          (async/close! res-ch)
-          (catch Exception e (async/put! res-ch (prep-ex "Failed to write raw value to store" e)))))
-      res-ch)))
+(defn connect-jdbc-store [db-spec & {:keys [table opts]
+                                     :or {table default-table}
+                                     :as params}]
+  (let [complete-opts (merge {:sync? true} opts)
+        datasource (jdbc/get-datasource db-spec)
+        backing (JDBCTable. db-spec datasource table)
+        config (merge {:table              table
+                       :opts               complete-opts
+                       :config             {:sync-blob? false
+                                            :in-place? true
+                                            :lock-blob? true}
+                       :default-serializer :FressianSerializer
+                       :compressor         null-compressor
+                       :encryptor          null-encryptor
+                       :buffer-size        (* 1024 1024)}
+                      (dissoc params :table :opts :config))
+        db-type (or (:dbtype db-spec) (:subprotocol db-spec))]
+    (when-not db-type
+      (throw (ex-info ":dbtype must be explicitly declared" {:options dbtypes})))
+    (when-not (supported-dbtypes db-type)
+      (warn "Unsupported database type " db-type
+            " - full functionality of store is only guaranteed for following database types: "  supported-dbtypes))
+    (new-default-store table backing nil nil nil config))) ;; uses async+sync macro
 
+(defn delete-store [db-spec & {:keys [table opts] :or {table default-table}}]
+  (let [complete-opts (merge {:sync? true}
+                             opts)
+        datasource (jdbc/get-datasource db-spec)
+        backing (JDBCTable. db-spec datasource table)]
 
-(defn new-jdbc-store
-  ([db & {:keys [table default-serializer serializers compressor encryptor read-handlers write-handlers]
-                    :or {default-serializer :FressianSerializer
-                         table "konserve"
-                         compressor comp/lz4-compressor
-                         encryptor encr/null-encryptor
-                         read-handlers (atom {})
-                         write-handlers (atom {})}}]
-    (let [res-ch (async/chan 1)
-          dbtype (or (:dbtype db) (:subprotocol db))]                      
-      (async/thread 
-        (try
-          (when-not dbtype 
-              (throw (ex-info ":dbtype must be explicitly declared" {:options dbtypes})))
-          (let [datasource (jdbc/get-datasource db)]
-            (case dbtype
+    (-delete-store backing complete-opts)))
 
-              "postgresql" 
-                (jdbc/execute! datasource [(str "create table if not exists " table " (id varchar(100) primary key, meta bytea, data bytea)")])
+(comment
+  (def db-spec
+    (let [dir "devh2"]
+      (.mkdirs (File. dir))
+      {:dbtype   "h2"
+       :dbname   (str "./" dir "/konserve;DB_CLOSE_ON_EXIT=FALSE")
+       :user     "sa"
+       :password ""}))
 
-              ("mssql" "sqlserver")
-                (jdbc/execute! datasource [(str "IF OBJECT_ID(N'dbo." table  "', N'U') IS NULL BEGIN  CREATE TABLE dbo." table " (id varchar(100) primary key, meta varbinary(max), data varbinary(max)); END;")])
-            
-                (jdbc/execute! datasource [(str "create table if not exists " table " (id varchar(100) primary key, meta longblob, data longblob)")]))
-            
-            (async/put! res-ch
-              (map->JDBCStore { :conn {:db db :table table :ds datasource}
-                                :default-serializer default-serializer
-                                :serializers (merge ser/key->serializer serializers)
-                                :compressor compressor
-                                :encryptor encryptor
-                                :read-handlers read-handlers
-                                :write-handlers write-handlers
-                                :locks (atom {})})))
-          (catch Exception e (async/put! res-ch (prep-ex "Failed to connect to store" e)))))
-      res-ch)))
+  (def db-spec
+    {:dbtype "mssql"
+     :dbname "tempdb"
+     :host "localhost"
+     :user "sa"
+     :password "passwordA1!"})
 
-(defn delete-store [store]
-  (let [res-ch (async/chan 1)]
-    (async/thread
-      (try
-        (jdbc/execute! (-> store :conn :ds) [(str "drop table " (-> store :conn :table))])
-        (async/close! res-ch)
-        (catch Exception e (async/put! res-ch (prep-ex "Failed to delete store" e)))))          
-    res-ch))
+  (def db-spec
+    {:dbtype "mysql"
+     :dbname "konserve"
+     :host "localhost"
+     :user "konserve"
+     :password "password"})
+
+  (def db-spec
+    {:dbtype "postgresql"
+     :dbname "konserve"
+     :host "localhost"
+     :user "konserve"
+     :password "password"})
+
+  (def db-spec
+    (let [dir "devsql"]
+      (.mkdirs (File. dir))
+      {:dbtype   "sqlite"
+       :dbname   (str "./" dir "/konserve")}))
+
+  (def db-spec
+    {:dbtype "sqlserver"
+     :dbname "tempdb"
+     :host "localhost"
+     :user "sa"
+     :password "passwordA1!"}))
+
+(comment
+
+  (require '[konserve.core :as k])
+  (import  '[java.io File])
+
+  (delete-store db-spec :opts {:sync? true})
+
+  (def store (connect-jdbc-store db-spec :opts {:sync? true}))
+
+  (time (k/assoc-in store ["foo"] {:foo "baz"} {:sync? true}))
+  (k/get-in store ["foo"] nil {:sync? true})
+  (k/exists? store "foo" {:sync? true})
+
+  (time (k/assoc-in store [:bar] 42 {:sync? true}))
+  (k/update-in store [:bar] inc {:sync? true})
+  (k/get-in store [:bar] nil {:sync? true})
+  (k/dissoc store :bar {:sync? true})
+
+  (k/append store :error-log {:type :horrible} {:sync? true})
+  (k/log store :error-log {:sync? true})
+
+  (k/keys store {:sync? true})
+
+  (k/bassoc store :binbar (byte-array (range 10)) {:sync? true})
+  (k/bget store :binbar (fn [{:keys [input-stream]}]
+                          (map byte (slurp input-stream)))
+          {:sync? true}))
+
+(comment
+
+  (require '[konserve.core :as k])
+  (require '[clojure.core.async :refer [<!!]])
+
+  (<!! (delete-store db-spec :opts {:sync? false}))
+
+  (def store (<!! (connect-jdbc-store db-spec :opts {:sync? false})))
+
+  (time (<!! (k/assoc-in store ["foo" :bar] {:foo "baz"} {:sync? false})))
+  (<!! (k/get-in store ["foo"] nil {:sync? false}))
+  (<!! (k/exists? store "foo" {:sync? false}))
+
+  (time (<!! (k/assoc-in store [:bar] 42 {:sync? false})))
+  (<!! (k/update-in store [:bar] inc {:sync? false}))
+  (<!! (k/get-in store [:bar] nil {:sync? false}))
+  (<!! (k/dissoc store :bar {:sync? false}))
+
+  (<!! (k/append store :error-log {:type :horrible} {:sync? false}))
+  (<!! (k/log store :error-log {:sync? false}))
+
+  (<!! (k/keys store {:sync? false}))
+
+  (<!! (k/bassoc store :binbar (byte-array (range 10)) {:sync? false}))
+  (<!! (k/bget store :binbar (fn [{:keys [input-stream]}]
+                               (map byte (slurp input-stream)))
+               {:sync? false})))
