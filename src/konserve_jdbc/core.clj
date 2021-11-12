@@ -1,6 +1,6 @@
 (ns konserve-jdbc.core
   "Address globally aggregated immutable key-value stores(s)."
-  (:require [konserve.impl.default :refer [new-default-store]]
+  (:require [konserve.impl.default :refer [connect-default-store]]
             [konserve.impl.storage-layout :refer [PBackingStore PBackingBlob PBackingLock -delete-store]]
             [konserve.compressor :refer [null-compressor]]
             [konserve.encryptor :refer [null-encryptor]]
@@ -131,9 +131,9 @@
 
 (defrecord JDBCRow [table key data]
   PBackingBlob
-  (-sync [this env]
+  (-sync [_ env]
     (if (:sync? env) nil (go-try- nil)))
-  (-close [this env]
+  (-close [_ env]
     (async+sync (:sync? env) *default-sync-translation*
                 (go-try-
                  (let [db-type (or (:dbtype (:db-spec table)) (:subprotocol (:db-spec table)))
@@ -143,80 +143,81 @@
                        (with-open [ps (jdbc/prepare conn (update-statement db-type (:table table) key header meta value))]
                          (jdbc/execute-one! ps))))
                    (reset! data {})))))
-  (-get-lock [this env]
+  (-get-lock [_ env]
     (if (:sync? env) true (go-try- true)))                       ;; May not return nil, otherwise eternal retries
-  (-read-header [this env]
+  (-read-header [_ env]
     (async+sync (:sync? env) *default-sync-translation*
                 (go-try-
                  (read-field table key :header))))
-  (-read-meta [this meta-size env]
+  (-read-meta [_ _meta-size env]
     (async+sync (:sync? env) *default-sync-translation*
                 (go-try-
                  (read-field table key :meta))))
-  (-read-value [this meta-size env]
+  (-read-value [_ _meta-size env]
     (async+sync (:sync? env) *default-sync-translation*
                 (go-try-
                  (read-field table key :value))))
-  (-read-binary [this meta-size locked-cb env]
+  (-read-binary [_ _meta-size locked-cb env]
     (async+sync (:sync? env) *default-sync-translation*
                 (go-try-
                  (read-field table key :value :binary? true :locked-cb locked-cb))))
-  (-write-header [this header env]
+  (-write-header [_ header env]
     (async+sync (:sync? env) *default-sync-translation*
                 (go-try-
                  (swap! data assoc :header header))))
-  (-write-meta [this meta env]
+  (-write-meta [_ meta env]
     (async+sync (:sync? env) *default-sync-translation*
                 (go-try-
                  (swap! data assoc :meta meta))))
-  (-write-value [this value meta-size env]
+  (-write-value [_ value _meta-size env]
     (async+sync (:sync? env) *default-sync-translation*
                 (go-try-
                  (swap! data assoc :value value))))
-  (-write-binary [this meta-size blob env]
+  (-write-binary [_ _meta-size blob env]
     (async+sync (:sync? env) *default-sync-translation*
                 (go-try-
                  (swap! data assoc :value blob)))))
 
 (defrecord JDBCTable [db-spec datasource table]
   PBackingStore
-  (-create-blob [this path env]
+  (-create-blob [this store-key env]
     (async+sync (:sync? env) *default-sync-translation*
                 (go-try-
-                 (JDBCRow. this path (atom {})))))
-  (-delete [this path env]
+                 (JDBCRow. this store-key (atom {})))))
+  (-delete-blob [_ store-key env]
     (async+sync (:sync? env) *default-sync-translation*
                 (go-try-
                  (jdbc/execute! datasource
-                                [(str "DELETE FROM " table " WHERE id = '" path "';")]))))
-  (-path [this store-key env]
-    (async+sync (:sync? env) *default-sync-translation*
-                (go-try- store-key)))                       ;; TODO: remove
-  (-exists [this path env]
+                                [(str "DELETE FROM " table " WHERE id = '" store-key "';")]))))
+  (-blob-exists? [_ store-key env]
     (async+sync (:sync? env) *default-sync-translation*
                 (go-try-
                  (with-open [conn (jdbc/get-connection datasource)]
                    (let [res (jdbc/execute! conn
-                                            [(str "SELECT 1 FROM " table " WHERE id = '" path "';")])]
+                                            [(str "SELECT 1 FROM " table " WHERE id = '" store-key "';")])]
                      (not (nil? (first res))))))))
-  (-copy [this from to env]
+  (-copy [_ from to env]
     (let [db-type (or (:dbtype db-spec) (:subprotocol db-spec))]
       (async+sync (:sync? env) *default-sync-translation*
                   (go-try- (jdbc/execute! datasource (copy-row-statement db-type table to from))))))
-  (-atomic-move [this from to env]
+  (-atomic-move [_ from to env]
     (async+sync (:sync? env) *default-sync-translation*
                 (go-try- (change-row-id datasource table from to))))
-  (-create-store [this env]
+  (-migratable [_ _key _store-key env]
+    (if (:sync? env) nil (go-try- nil)))
+  (-migrate [_ _migration-key _key-vec _serializer _read-handlers _write-handlers env]
+    (if (:sync? env) nil (go-try- nil)))
+  (-create-store [_ env]
     (let [db-type (or (:dbtype db-spec) (:subprotocol db-spec))]
       (async+sync (:sync? env) *default-sync-translation*
                   (go-try- (jdbc/execute! datasource (create-statement db-type table))))))
-  (-sync-store [this env]
+  (-sync-store [_ env]
     (if (:sync? env) nil (go-try- nil)))
-  (-delete-store [this env]
+  (-delete-store [_ env]
     (let [db-type (or (:dbtype db-spec) (:subprotocol db-spec))]
       (async+sync (:sync? env) *default-sync-translation*
                   (go-try- (jdbc/execute! datasource (delete-statement db-type table))))))
-  (-keys [this path env]
+  (-keys [_ env]
     (async+sync (:sync? env) *default-sync-translation*
                 (go-try-
                  (with-open [conn (jdbc/get-connection datasource)]
@@ -247,23 +248,21 @@
     (when-not (supported-dbtypes db-type)
       (warn "Unsupported database type " db-type
             " - full functionality of store is only guaranteed for following database types: "  supported-dbtypes))
-    (new-default-store table backing nil nil nil config))) ;; uses async+sync macro
+    (connect-default-store backing config)))
 
 (defn delete-store [db-spec & {:keys [table opts] :or {table default-table}}]
-  (let [complete-opts (merge {:sync? true}
-                             opts)
+  (let [complete-opts (merge {:sync? true}opts)
         datasource (jdbc/get-datasource db-spec)
         backing (JDBCTable. db-spec datasource table)]
-
     (-delete-store backing complete-opts)))
 
 (comment
   (def db-spec
     (let [dir "devh2"]
       (.mkdirs (File. dir))
-      {:dbtype   "h2"
-       :dbname   (str "./" dir "/konserve;DB_CLOSE_ON_EXIT=FALSE")
-       :user     "sa"
+      {:dbtype "h2"
+       :dbname (str "./" dir "/konserve;DB_CLOSE_ON_EXIT=FALSE")
+       :user "sa"
        :password ""}))
 
   (def db-spec
@@ -290,8 +289,8 @@
   (def db-spec
     (let [dir "devsql"]
       (.mkdirs (File. dir))
-      {:dbtype   "sqlite"
-       :dbname   (str "./" dir "/konserve")}))
+      {:dbtype "sqlite"
+       :dbname (str "./" dir "/konserve")}))
 
   (def db-spec
     {:dbtype "sqlserver"
