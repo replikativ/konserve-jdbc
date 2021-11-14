@@ -251,7 +251,7 @@
     (connect-default-store backing config)))
 
 (defn delete-store [db-spec & {:keys [table opts] :or {table default-table}}]
-  (let [complete-opts (merge {:sync? true}opts)
+  (let [complete-opts (merge {:sync? true} opts)
         datasource (jdbc/get-datasource db-spec)
         backing (JDBCTable. db-spec datasource table)]
     (-delete-store backing complete-opts)))

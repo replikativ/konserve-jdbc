@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+
+set -o errexit
+set -o pipefail
+
+trap teardown EXIT
+
+function setup() {
+    if [ -z ${CIRCLECI} ]; then
+        echo $(sudo docker-compose -f ./docker-compose.yml up --detach)
+    fi
+}
+
+function teardown() {
+    if [ -z ${CIRCLECI} ]; then
+        sudo docker-compose -f ./docker-compose.yml down
+    fi
+}
+
+setup
+./bin/kaocha
