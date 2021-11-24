@@ -2,24 +2,24 @@ version: '3.3'
 
 services:
   mysql:
-    image: mysql:5.7
+    image: docker.io/mysql:8
     restart: always
-    command: --max_allowed_packet=32505856 
+    command: --max_allowed_packet=32505856
     environment:
       MYSQL_ROOT_PASSWORD: password
-      MYSQL_DATABASE: konserve
-      MYSQL_USER: konserve
-      MYSQL_PASSWORD: password
+      MYSQL_DATABASE: config-test
+      MYSQL_USER: alice
+      MYSQL_PASSWORD: foo
     ports:
       - 3306:3306
 
   postgres:
-    image: postgres:13.2
+    image: docker.io/postgres:14
     restart: always
     environment:
-      POSTGRES_DB: konserve
-      POSTGRES_USER: konserve
-      POSTGRES_PASSWORD: password
+      POSTGRES_DB: config-test
+      POSTGRES_USER: alice
+      POSTGRES_PASSWORD: foo
     ports:
       - "5432:5432"
 
@@ -30,10 +30,6 @@ services:
       ACCEPT_EULA: Y
       SA_PASSWORD: passwordA1!
       MSSQL_PID: Developer
-      MYSQL_DATABASE: konserve
-      MYSQL_USER: konserve
-      MYSQL_PASSWORD: password
       MSSQL_TCP_PORT: 1433
     ports:
       - 1433:1433
-    

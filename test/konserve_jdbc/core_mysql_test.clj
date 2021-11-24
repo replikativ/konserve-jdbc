@@ -6,10 +6,10 @@
 
 (def db-spec
   {:dbtype "mysql"
-   :dbname "konserve"
+   :dbname "config-test"
    :host "localhost"
-   :user "konserve"
-   :password "password"})
+   :user "alice"
+   :password "foo"})
 
 (deftest jdbc-compliance-sync-test
   (let [_ (delete-store db-spec :table "compliance_test" :opts {:sync? true})
