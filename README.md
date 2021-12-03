@@ -4,9 +4,9 @@ A [JDBC](https://github.com/clojure/java.jdbc) backend for [konserve](https://gi
 
 ## Usage
 
-<!--- Add to your leiningen dependencies:
-[[http://clojars.org/io.replikativ/konserve-jdbc]][[http://clojars.org/io.replikativ/konserve-jdbc/latest-version.svg]]]]
--->
+Add to your dependencies:
+
+[![Clojars Project](http://clojars.org/io.replikativ/konserve-jdbc/latest-version.svg)](http://clojars.org/io.replikativ/konserve-jdbc)
 
 ### Synchronous Execution
 
