@@ -1,6 +1,6 @@
 {:paths ["src"]
- :deps {com.h2database/h2 {:mvn/version "2.0.202"}
-        com.microsoft.sqlserver/mssql-jdbc {:mvn/version "9.4.0.jre11"}
+ :deps {com.h2database/h2 {:mvn/version "2.0.204"}
+        com.microsoft.sqlserver/mssql-jdbc {:mvn/version "9.4.1.jre11"}
         com.taoensso/timbre {:mvn/version "5.1.2"}
         io.replikativ/konserve {:mvn/version "0.6.0-SNAPSHOT"}
         io.replikativ/superv.async {:mvn/version "0.2.11"}
@@ -10,7 +10,7 @@
         org.postgresql/postgresql {:mvn/version "42.3.1"}
         org.xerial/sqlite-jdbc {:mvn/version "3.36.0.2"}
         seancorfield/next.jdbc {:mvn/version "1.2.659"}}
- :aliases {:test {:extra-deps {lambdaisland/kaocha {:mvn/version "1.60.945"}}
+ :aliases {:test {:extra-deps {lambdaisland/kaocha {:mvn/version "1.60.977"}}
                   :extra-paths ["test"]}
            :jar {:extra-deps {seancorfield/depstar {:mvn/version "1.1.116"}}
                  :main-opts ["-m" "hf.depstar.jar" "replikativ-konserve-jdbc.jar"]}
