@@ -146,6 +146,6 @@ feature, please let us know.
 
 ## License
 
-Copyright © 2021 Judith Massa, Alexander Oloo
+Copyright © 2021-2022 Judith Massa, Alexander Oloo
 
 Licensed under Eclipse Public License (see [LICENSE](LICENSE)).
