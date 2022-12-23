@@ -2,8 +2,8 @@
  :deps {com.h2database/h2 {:mvn/version "2.0.204"}
         com.microsoft.sqlserver/mssql-jdbc {:mvn/version "9.4.1.jre11"}
         com.taoensso/timbre {:mvn/version "5.1.2"}
-        io.replikativ/konserve {:mvn/version "0.6.0-SNAPSHOT"}
-        io.replikativ/superv.async {:mvn/version "0.2.11"}
+        io.replikativ/konserve {:mvn/version "0.7.285"}
+        io.replikativ/superv.async {:mvn/version "0.3.43"}
         mysql/mysql-connector-java {:mvn/version "8.0.25"}
         org.apache.derby/derby {:mvn/version "10.15.2.0"}
         org.clojure/clojure {:mvn/version "1.10.3"}

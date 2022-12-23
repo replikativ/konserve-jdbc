@@ -1,6 +1,6 @@
 (ns konserve-jdbc.core
   "Address globally aggregated immutable key-value stores(s)."
-  (:require [konserve.impl.default :refer [connect-default-store]]
+  (:require [konserve.impl.defaults :refer [connect-default-store]]
             [konserve.impl.storage-layout :refer [PBackingStore PBackingBlob PBackingLock -delete-store]]
             [konserve.compressor :refer [null-compressor]]
             [konserve.encryptor :refer [null-encryptor]]
