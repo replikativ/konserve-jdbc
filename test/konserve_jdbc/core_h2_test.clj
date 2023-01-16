@@ -1,5 +1,5 @@
 (ns konserve-jdbc.core-h2-test
-  (:require [clojure.test :refer [deftest is testing use-fixtures]]
+  (:require [clojure.test :refer [deftest testing use-fixtures]]
             [clojure.core.async :refer [<!!]]
             [konserve.compliance-test :refer [compliance-test]]
             [konserve-jdbc.core :refer [connect-store release delete-store]]

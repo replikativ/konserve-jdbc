@@ -5,8 +5,8 @@
             [konserve.compressor :refer [null-compressor]]
             [konserve.encryptor :refer [null-encryptor]]
             [konserve.utils :refer [async+sync *default-sync-translation*]]
-            [superv.async :refer [go-try- <?-]]
-            [clojure.core.async :refer [go <!! chan close! put!]]
+            [superv.async :refer [go-try-]]
+            [clojure.core.async :refer [<!!]]
             [next.jdbc :as jdbc]
             [next.jdbc.result-set :as rs]
             [taoensso.timbre :refer [warn]])
