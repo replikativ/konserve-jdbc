@@ -222,7 +222,8 @@
     (if (:sync? env) nil (go-try- nil)))
   (-delete-store [_ env]
     (async+sync (:sync? env) *default-sync-translation*
-                (go-try- (jdbc/execute! connection (delete-statement (:dbtype db-spec) table)))))
+                (go-try- (jdbc/execute! connection (delete-statement (:dbtype db-spec) table))
+                         (.close ^Connection connection))))
   (-keys [_ env]
     (async+sync (:sync? env) *default-sync-translation*
                 (go-try- (let [res' (jdbc/execute! connection
@@ -242,9 +243,10 @@
 
   (when-not (:dbtype db-spec)
       (throw (ex-info ":dbtype must be explicitly declared" {:options dbtypes})))
-    (when-not (supported-dbtypes (:dbtype db-spec))
-      (warn "Unsupported database type " (:dbtype db-spec)
-            " - full functionality of store is only guaranteed for following database types: "  supported-dbtypes))
+  
+  (when-not (supported-dbtypes (:dbtype db-spec))
+    (warn "Unsupported database type " (:dbtype db-spec)
+          " - full functionality of store is only guaranteed for following database types: "  supported-dbtypes))
 
   (let [complete-opts (merge {:sync? true} opts)
         db-spec (if (:dbtype db-spec)
@@ -272,7 +274,7 @@
 
 (defn delete-store [db-spec & {:keys [table opts] :or {table default-table}}]
   (let [complete-opts (merge {:sync? true} opts)
-        ^Connection connection (jdbc/get-connection db-spec)
+        connection (jdbc/get-connection db-spec)
         backing (JDBCTable. db-spec connection table)]
     (-delete-store backing complete-opts)))
 
