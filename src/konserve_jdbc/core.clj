@@ -201,10 +201,10 @@
                   ;; Using CREATE IF NOT EXISTS is regarded as a schema change. To allow the store to be used
                   ;; where schema changes are not allowed on production e.g. planetscale or the user does have schema permissions,
                   ;; we test for existence first. This triggers an exception if it doesn't exist which we catch. 
-                  ;; Testing for existance in other ways is not worth the effort as it is specific to the db setup 
+                  ;; Testing for existence in other ways is not worth the effort as it is specific to the db setup 
                   ;; not just the type
                   (let [res (try 
-                              (jdbc/execute! connection [(str "select * from " table " limit 1")])
+                              (jdbc/execute! connection [(str "select 1 from " table " limit 1")])
                               (catch Exception _e (spit "trace.txt" (pr-str (.getStackTrace _e)) :append true) []))]
                     (when (empty? res)                                                      
                       (jdbc/execute! connection (create-statement (:dbtype db-spec) table)))))))
