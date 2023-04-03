@@ -9,7 +9,8 @@
         org.clojure/clojure {:mvn/version "1.10.3"}
         org.postgresql/postgresql {:mvn/version "42.3.1"}
         org.xerial/sqlite-jdbc {:mvn/version "3.36.0.2"}
-        seancorfield/next.jdbc {:mvn/version "1.2.659"}}
+        seancorfield/next.jdbc {:mvn/version "1.2.659"}
+        com.mchange/c3p0 {:mvn/version"0.9.5.5"}}
  :aliases {:test {:extra-deps {lambdaisland/kaocha {:mvn/version "1.60.977"}}
                   :extra-paths ["test"]}
            :jar {:extra-deps {seancorfield/depstar {:mvn/version "1.1.116"}}
