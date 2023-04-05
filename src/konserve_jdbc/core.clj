@@ -9,7 +9,7 @@
             [clojure.core.async :refer [go <!! chan close! put!]]
             [next.jdbc :as jdbc]
             [next.jdbc.result-set :as rs]
-            [taoensso.timbre :refer [warn]])
+            [taoensso.timbre :refer [warn debug]])
   (:import [java.sql Blob]
            (java.io ByteArrayInputStream)
            (java.sql Connection)))
@@ -205,8 +205,8 @@
                   ;; not just the type
                   (let [res (try 
                               (jdbc/execute! connection [(str "select 1 from " table " limit 1")])
-                              (catch Exception _e (spit "trace.txt" (pr-str (.getStackTrace _e)) :append true) []))]
-                    (when (empty? res)                                                      
+                              (catch Exception _e (warn (str "Table " table " does not exist. Attempting to create it.")) nil))]
+                    (when (nil? res)                                                      
                       (jdbc/execute! connection (create-statement (:dbtype db-spec) table)))))))
   (-sync-store [_ env]
     (if (:sync? env) nil (go-try- nil)))
