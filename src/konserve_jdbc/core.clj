@@ -205,7 +205,7 @@
                   ;; not just the type
                   (let [res (try 
                               (jdbc/execute! connection [(str "select 1 from " table " limit 1")])
-                              (catch Exception _e (warn (str "Table " table " does not exist. Attempting to create it.")) nil))]
+                              (catch Exception _e (debug (str "Table " table " does not exist. Attempting to create it.")) nil))]
                     (when (nil? res)                                                      
                       (jdbc/execute! connection (create-statement (:dbtype db-spec) table)))))))
   (-sync-store [_ env]
