@@ -26,3 +26,6 @@
       (compliance-test store))
     (<!! (release store {:sync? false}))
     (<!! (delete-store db-spec :opts {:sync? false}))))
+
+(comment
+  (delete-store db-spec :table "compliance_test" :opts {:sync? true}))

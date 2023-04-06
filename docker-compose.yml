@@ -11,7 +11,7 @@ services:
       MYSQL_USER: alice
       MYSQL_PASSWORD: foo
     ports:
-      - 3306:3306
+      - "3306:3306"
 
   postgres:
     image: docker.io/postgres:14
@@ -32,4 +32,4 @@ services:
       MSSQL_PID: Developer
       MSSQL_TCP_PORT: 1433
     ports:
-      - 1433:1433
+      - "1433:1433"

@@ -248,8 +248,11 @@
         backing (JDBCTable. db-spec connection table)]
     (-delete-store backing complete-opts)))
 
+(comment 
+  (require '[konserve.core :as k])
+  (import  '[java.io File]))
+
 (comment
-  (import  '[java.io File])
 
   (def db-spec
     (let [dir "devh2"]
@@ -295,8 +298,6 @@
 
 (comment
 
-  (require '[konserve.core :as k])
-
   (delete-store db-spec :opts {:sync? true})
 
   (def store (connect-store db-spec :opts {:sync? true}))
@@ -323,9 +324,6 @@
   (release store {:sync? true}))
 
 (comment
-
-  (require '[konserve.core :as k])
-  (require '[clojure.core.async :refer [<!!]])
 
   (<!! (delete-store db-spec :opts {:sync? false}))
 

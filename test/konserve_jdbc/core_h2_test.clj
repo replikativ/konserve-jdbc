@@ -3,9 +3,9 @@
             [clojure.core.async :refer [<!!]]
             [konserve.compliance-test :refer [compliance-test]]
             [konserve-jdbc.core :refer [connect-store release delete-store]]
-            [konserve-jdbc.util :refer [with-dir]]))
+            [konserve-jdbc.util :as u]))
 
-(use-fixtures :once (partial with-dir "./tmp/h2"))
+(use-fixtures :once (partial u/with-dir "./tmp/h2"))
 
 (def db-spec
   {:dbtype "h2"

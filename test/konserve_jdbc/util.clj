@@ -2,6 +2,9 @@
   (:require [clojure.java.io :as io])
   (:import  [java.io File]))
 
+(defn create-path [filename]
+  (.mkdirs (File. filename)))
+
 (defn delete-recursively [filename]
   (let [func (fn [func f]
                (when (.isDirectory ^File f)
@@ -11,6 +14,6 @@
     (func func (io/file filename))))
 
 (defn with-dir [^String dir f]
-  (.mkdirs (File. dir))
+  (create-path dir)
   (f)
   (delete-recursively dir))
