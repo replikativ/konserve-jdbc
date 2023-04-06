@@ -5,8 +5,8 @@
             [konserve.compressor :refer [null-compressor]]
             [konserve.encryptor :refer [null-encryptor]]
             [konserve.utils :refer [async+sync *default-sync-translation*]]
-            [superv.async :refer [go-try- <?-]]
-            [clojure.core.async :refer [go <!! chan close! put!]]
+            [superv.async :refer [go-try-]]
+            [clojure.core.async :refer [<!!]]
             [next.jdbc :as jdbc]
             [next.jdbc.result-set :as rs]
             [taoensso.timbre :refer [warn]])
@@ -248,8 +248,11 @@
         backing (JDBCTable. db-spec connection table)]
     (-delete-store backing complete-opts)))
 
+(comment 
+  (require '[konserve.core :as k])
+  (import  '[java.io File]))
+
 (comment
-  (import  '[java.io File])
 
   (def db-spec
     (let [dir "devh2"]
@@ -295,8 +298,6 @@
 
 (comment
 
-  (require '[konserve.core :as k])
-
   (delete-store db-spec :opts {:sync? true})
 
   (def store (connect-store db-spec :opts {:sync? true}))
@@ -323,9 +324,6 @@
   (release store {:sync? true}))
 
 (comment
-
-  (require '[konserve.core :as k])
-  (require '[clojure.core.async :refer [<!!]])
 
   (<!! (delete-store db-spec :opts {:sync? false}))
 

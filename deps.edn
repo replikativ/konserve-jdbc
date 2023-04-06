@@ -1,22 +1,23 @@
-{:paths ["src"]
- :deps {com.h2database/h2 {:mvn/version "2.0.204"}
-        com.microsoft.sqlserver/mssql-jdbc {:mvn/version "9.4.1.jre11"}
-        com.taoensso/timbre {:mvn/version "5.1.2"}
-        io.replikativ/konserve {:mvn/version "0.7.285"}
-        io.replikativ/superv.async {:mvn/version "0.3.43"}
-        mysql/mysql-connector-java {:mvn/version "8.0.25"}
-        org.apache.derby/derby {:mvn/version "10.15.2.0"}
-        org.clojure/clojure {:mvn/version "1.10.3"}
-        org.postgresql/postgresql {:mvn/version "42.3.1"}
-        org.xerial/sqlite-jdbc {:mvn/version "3.36.0.2"}
-        seancorfield/next.jdbc {:mvn/version "1.2.659"}}
- :aliases {:test {:extra-deps {lambdaisland/kaocha {:mvn/version "1.60.977"}}
-                  :extra-paths ["test"]}
-           :jar {:extra-deps {seancorfield/depstar {:mvn/version "1.1.116"}}
-                 :main-opts ["-m" "hf.depstar.jar" "replikativ-konserve-jdbc.jar"]}
-           :deploy {:extra-deps {deps-deploy/deps-deploy {:mvn/version "0.0.9"}}
-                    :main-opts ["-m" "deps-deploy.deps-deploy" "deploy" "replikativ-konserve-jdbc.jar"]}
+{:paths   ["src"]
+ :deps    {com.fzakaria/slf4j-timbre          {:mvn/version "0.3.21"}
+           com.h2database/h2                  {:mvn/version "2.1.214"}
+           com.microsoft.sqlserver/mssql-jdbc {:mvn/version "11.2.2.jre11"}
+           com.taoensso/timbre                {:mvn/version "6.0.4"}
+           io.replikativ/konserve             {:mvn/version "0.7.285"}
+           io.replikativ/superv.async         {:mvn/version "0.3.43"}
+           mysql/mysql-connector-java         {:mvn/version "8.0.30"}
+           org.apache.derby/derby             {:mvn/version "10.15.2.0"}
+           org.clojure/clojure                {:mvn/version "1.11.1"}
+           org.postgresql/postgresql          {:mvn/version "42.5.1"}
+           org.xerial/sqlite-jdbc             {:mvn/version "3.40.0.0"}
+           seancorfield/next.jdbc             {:mvn/version "1.2.659"}}
+ :aliases {:test   {:extra-deps  {lambdaisland/kaocha {:mvn/version "1.72.1136"}}
+                    :extra-paths ["test"]}
+           :jar    {:extra-deps {seancorfield/depstar {:mvn/version "2.0.216"}}
+                    :main-opts  ["-m" "hf.depstar.jar" "replikativ-konserve-jdbc.jar"]}
+           :deploy {:extra-deps {deps-deploy/deps-deploy {:mvn/version "0.0.12"}}
+                    :main-opts  ["-m" "deps-deploy.deps-deploy" "deploy" "replikativ-konserve-jdbc.jar"]}
            :format {:extra-deps {cljfmt/cljfmt {:mvn/version "0.7.0"}}
-                    :main-opts ["-m" "cljfmt.main" "check"]}
-           :ffix {:extra-deps {cljfmt/cljfmt {:mvn/version "0.8.0"}}
-                  :main-opts ["-m" "cljfmt.main" "fix"]}}}
+                    :main-opts  ["-m" "cljfmt.main" "check"]}
+           :ffix   {:extra-deps {cljfmt/cljfmt {:mvn/version "0.9.0"}}
+                    :main-opts  ["-m" "cljfmt.main" "fix"]}}}

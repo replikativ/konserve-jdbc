@@ -1,5 +1,5 @@
 (ns konserve-jdbc.core-mysql-test
-  (:require [clojure.test :refer [deftest is testing use-fixtures]]
+  (:require [clojure.test :refer [deftest testing]]
             [clojure.core.async :refer [<!!]]
             [konserve.compliance-test :refer [compliance-test]]
             [konserve-jdbc.core :refer [connect-store release delete-store]]))
@@ -26,3 +26,6 @@
       (compliance-test store))
     (<!! (release store {:sync? false}))
     (<!! (delete-store db-spec :opts {:sync? false}))))
+
+(comment
+  (delete-store db-spec :table "compliance_test" :opts {:sync? true}))
