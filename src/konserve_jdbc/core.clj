@@ -44,6 +44,10 @@
           (Thread. ^Runnable shutdown))
         conns))))
 
+(defn remove-from-pool [db-spec]
+  (let [id (pool-key db-spec)]
+    (swap! pool dissoc id)))
+
 (defn extract-bytes [obj dbtype]
   (when obj
     (case dbtype
@@ -236,6 +240,8 @@
                                 :as params}]
 
   (when-not (:debug opts)
+      ;; c3p0 is very noisy. Without this the reads and writes to the DB 
+      ;; overwhelm the logs of downstream applications making them very difficult to debug
       (System/setProperties 
         (doto (java.util.Properties. (System/getProperties))
           (.put "com.mchange.v2.log.MLog" "com.mchange.v2.log.FallbackMLog")
@@ -270,7 +276,9 @@
   "Must be called after work on database has finished in order to close connection"
   [store env]
   (async+sync (:sync? env) *default-sync-translation*
-              (go-try- (.close ^PooledDataSource (:connection ^JDBCTable (:backing store))))))
+              (go-try- 
+                (.close ^PooledDataSource (:connection ^JDBCTable (:backing store)))
+                (remove-from-pool (:db-spec ^JDBCTable (:backing store))))))
 
 (defn delete-store [db-spec & {:keys [table opts] :or {table default-table}}]
   (let [complete-opts (merge {:sync? true} opts)
