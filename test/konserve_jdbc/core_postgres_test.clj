@@ -2,7 +2,7 @@
   (:require [clojure.test :refer [deftest is testing use-fixtures]]
             [clojure.core.async :refer [<!!]]
             [konserve.compliance-test :refer [compliance-test]]
-            [konserve-jdbc.core :refer [connect-store release delete-store]]))
+            [konserve-jdbc.core :refer [connect-store release delete-store default-c3p0-level]]))
 
 (def db-spec
   {:dbtype "postgresql"
