@@ -20,11 +20,8 @@
 (set! *warn-on-reflection* 1)
 
 (def ^:const default-table "konserve")
-(def ^:const default-c3p0-level :warn)
 (def ^:const dbtypes ["h2" "h2:mem" "hsqldb" "jtds:sqlserver" "mysql" "oracle:oci" "oracle:thin" "postgresql" "redshift" "sqlite" "sqlserver" "mssql"])
 (def ^:const supported-dbtypes #{"h2" "mysql" "postgresql" "sqlite" "sqlserver" "mssql"})
-(def ^:const c3p0-log-levels {:report "SEVERE" :fatal "SEVERE" :error "SEVERE" :warn "WARNING" :info "INFO" :debug "FINE" :trace "ALL" ;; map timbre log levels to c3p0
-                              :off "OFF" :severe "SEVERE" :warning "WARNING" :config "CONFIG" :fine "FINE" :finer "FINER" :finest "FINEST" :all "ALL"}) ;; allow c3p0 level directly as well
 
 ;; this is the link to the various connection pools
 (defonce pool (atom nil))
@@ -238,21 +235,9 @@
                                                    {:builder-fn rs/as-unqualified-lower-maps})]
                            (map :id res'))))))
 
-(defn set-log-level [opts]
-  (let [config-level (-> opts :c3p0-log-level keyword)
-        timbre-level (-> timbre/*config* :min-level)
-        level (or config-level timbre-level default-c3p0-level)
-        c3p0-level (get c3p0-log-levels level)]
-    (System/setProperties 
-      (doto (java.util.Properties. (System/getProperties))
-        (.put "com.mchange.v2.log.MLog" "com.mchange.v2.log.FallbackMLog")
-        (.put "com.mchange.v2.log.FallbackMLog.DEFAULT_CUTOFF_LEVEL" c3p0-level)))
-    level))
-
 (defn connect-store [db-spec & {:keys [table opts]
                                 :or {table default-table}
                                 :as params}]
-
   (when-not (:dbtype db-spec)
       (throw (ex-info ":dbtype must be explicitly declared" {:options dbtypes})))
   
@@ -260,14 +245,15 @@
     (warn "Unsupported database type " (:dbtype db-spec)
           " - full functionality of store is only guaranteed for following database types: "  supported-dbtypes))
 
-  (let [final-log-level (set-log-level opts)
-        complete-opts (merge {:sync? true :c3p0-log-level final-log-level} 
-                             opts)
+  (System/setProperties 
+      (doto (java.util.Properties. (System/getProperties))
+        (.put "com.mchange.v2.log.MLog" "com.mchange.v2.log.slf4j.Slf4jMLog"))) ;; using  Slf4j allows timbre to control logs.
+    
+  (let [complete-opts (merge {:sync? true} opts)
         db-spec (if (:dbtype db-spec)
                   db-spec
                   (assoc db-spec :dbtype (:subprotocol db-spec)))
         db-spec (assoc db-spec :sync? (:sync? complete-opts))
-        _ (set-log-level opts)
         ^PooledDataSource connection (get-connection db-spec)
         backing (JDBCTable. db-spec connection table)
         config (merge {:opts               complete-opts
@@ -346,7 +332,7 @@
 
   (delete-store db-spec :opts {:sync? true})
 
-  (def store (connect-store db-spec :opts {:sync? true}))
+  (def store (connect-store db-spec :opts {:sync? true :c3p0-log-level :all}))
 
   (time (k/assoc-in store ["foo"] {:foo "baz"} {:sync? true}))
   (k/get-in store ["foo"] nil {:sync? true})

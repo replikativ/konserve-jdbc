@@ -2,6 +2,7 @@
  :deps {com.h2database/h2 {:mvn/version "2.0.204"}
         com.microsoft.sqlserver/mssql-jdbc {:mvn/version "9.4.1.jre11"}
         com.taoensso/timbre {:mvn/version "5.1.2"}
+        com.fzakaria/slf4j-timbre {:mvn/version "0.3.21"}
         io.replikativ/konserve {:mvn/version "0.7.285"}
         io.replikativ/superv.async {:mvn/version "0.3.43"}
         mysql/mysql-connector-java {:mvn/version "8.0.25"}
