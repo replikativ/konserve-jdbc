@@ -10,7 +10,7 @@
             [next.jdbc :as jdbc]
             [next.jdbc.result-set :as rs]
             [next.jdbc.connection :as connection]
-            [taoensso.timbre :as timbre :refer [warn]]
+            [taoensso.timbre :refer [warn]]
             [hasch.core :as hasch])
   (:import [java.sql Blob]
            [com.mchange.v2.c3p0 ComboPooledDataSource PooledDataSource] 
