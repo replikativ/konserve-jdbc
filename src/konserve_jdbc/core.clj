@@ -332,7 +332,7 @@
 
   (delete-store db-spec :opts {:sync? true})
 
-  (def store (connect-store db-spec :opts {:sync? true :c3p0-log-level :all}))
+  (def store (connect-store db-spec :opts {:sync? true}))
 
   (time (k/assoc-in store ["foo"] {:foo "baz"} {:sync? true}))
   (k/get-in store ["foo"] nil {:sync? true})
