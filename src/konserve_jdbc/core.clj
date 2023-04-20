@@ -9,8 +9,11 @@
             [clojure.core.async :refer [go <!! chan close! put!]]
             [next.jdbc :as jdbc]
             [next.jdbc.result-set :as rs]
-            [taoensso.timbre :refer [warn]])
+            [next.jdbc.connection :as connection]
+            [taoensso.timbre :refer [warn]]
+            [hasch.core :as hasch])
   (:import [java.sql Blob]
+           [com.mchange.v2.c3p0 ComboPooledDataSource PooledDataSource] 
            (java.io ByteArrayInputStream)
            (java.sql Connection)))
 
@@ -19,6 +22,31 @@
 (def ^:const default-table "konserve")
 (def ^:const dbtypes ["h2" "h2:mem" "hsqldb" "jtds:sqlserver" "mysql" "oracle:oci" "oracle:thin" "postgresql" "redshift" "sqlite" "sqlserver" "mssql"])
 (def ^:const supported-dbtypes #{"h2" "mysql" "postgresql" "sqlite" "sqlserver" "mssql"})
+
+;; this is the link to the various connection pools
+(defonce pool (atom nil))
+
+;; each unique spec will have its own pool
+(defn- pool-key [db-spec]
+  (keyword
+    (str (hasch/uuid  (select-keys db-spec [:dbtype :jdbcUrl :host :port :user :password :dbname :sync?])))))
+
+(defn get-connection [db-spec]
+  (let [id (pool-key db-spec)
+        conn (get @pool id)]
+    (if-not (nil? conn) 
+      conn
+      (let [conns ^PooledDataSource (connection/->pool ComboPooledDataSource db-spec)
+            shutdown (fn [] (.close ^PooledDataSource conns))] 
+        (swap! pool assoc id conns)
+        (.close (jdbc/get-connection conns))
+        (.addShutdownHook (Runtime/getRuntime) 
+          (Thread. ^Runnable shutdown))
+        conns))))
+
+(defn remove-from-pool [db-spec]
+  (let [id (pool-key db-spec)]
+    (swap! pool dissoc id)))
 
 (defn extract-bytes [obj dbtype]
   (when obj
@@ -133,12 +161,8 @@
     (async+sync (:sync? env) *default-sync-translation*
                 (go-try- (let [{:keys [header meta value]} @data]
                            (if (and header meta value)
-                             (with-open [ps (jdbc/prepare (:connection table)
-                                                          (update-statement (:dbtype (:db-spec table))
-                                                                            (:table table)
-                                                                            key
-                                                                            header meta value))]
-                               (jdbc/execute-one! ps))
+                             (let [ps (update-statement (:dbtype (:db-spec table)) (:table table) key header meta value)]
+                               (jdbc/execute-one! (:connection table) ps))
                              (throw (ex-info "Updating a row is only possible if header, meta and value are set." {:data @data})))
                            (reset! data {})))))
   (-close [_ env]
@@ -171,7 +195,7 @@
     (async+sync (:sync? env) *default-sync-translation*
                 (go-try- (swap! data assoc :value blob)))))
 
-(defrecord JDBCTable [db-spec ^Connection connection table]
+(defrecord JDBCTable [db-spec connection table]
   PBackingStore
   (-create-blob [this store-key env]
     (async+sync (:sync? env) *default-sync-translation*
@@ -214,11 +238,23 @@
 (defn connect-store [db-spec & {:keys [table opts]
                                 :or {table default-table}
                                 :as params}]
+  (when-not (:dbtype db-spec)
+      (throw (ex-info ":dbtype must be explicitly declared" {:options dbtypes})))
+  
+  (when-not (supported-dbtypes (:dbtype db-spec))
+    (warn "Unsupported database type " (:dbtype db-spec)
+          " - full functionality of store is only guaranteed for following database types: "  supported-dbtypes))
+
+  (System/setProperties 
+      (doto (java.util.Properties. (System/getProperties))
+        (.put "com.mchange.v2.log.MLog" "com.mchange.v2.log.slf4j.Slf4jMLog"))) ;; using  Slf4j allows timbre to control logs.
+    
   (let [complete-opts (merge {:sync? true} opts)
-        connection (jdbc/get-connection db-spec)
         db-spec (if (:dbtype db-spec)
                   db-spec
                   (assoc db-spec :dbtype (:subprotocol db-spec)))
+        db-spec (assoc db-spec :sync? (:sync? complete-opts))
+        ^PooledDataSource connection (get-connection db-spec)
         backing (JDBCTable. db-spec connection table)
         config (merge {:opts               complete-opts
                        :config             {:sync-blob? true
@@ -229,18 +265,15 @@
                        :encryptor          null-encryptor
                        :buffer-size        (* 1024 1024)}
                       (dissoc params :opts :config))]
-    (when-not (:dbtype db-spec)
-      (throw (ex-info ":dbtype must be explicitly declared" {:options dbtypes})))
-    (when-not (supported-dbtypes (:dbtype db-spec))
-      (warn "Unsupported database type " (:dbtype db-spec)
-            " - full functionality of store is only guaranteed for following database types: "  supported-dbtypes))
     (connect-default-store backing config)))
 
 (defn release
   "Must be called after work on database has finished in order to close connection"
   [store env]
   (async+sync (:sync? env) *default-sync-translation*
-              (go-try- (.close ^Connection (:connection ^JDBCTable (:backing store))))))
+              (go-try- 
+                (.close ^PooledDataSource (:connection ^JDBCTable (:backing store)))
+                (remove-from-pool (:db-spec ^JDBCTable (:backing store))))))
 
 (defn delete-store [db-spec & {:keys [table opts] :or {table default-table}}]
   (let [complete-opts (merge {:sync? true} opts)
