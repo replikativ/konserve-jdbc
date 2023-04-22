@@ -284,7 +284,7 @@
   [store env]
   (async+sync (:sync? env) *default-sync-translation*
               (go-try- 
-                (.close ^PooledDataSource (:connection ^JDBCTable (:backing store)))
+                (.close ^ComboPooledDataSource (:connection ^JDBCTable (:backing store)))
                 (remove-from-pool (:db-spec ^JDBCTable (:backing store))))))
 
 (defn delete-store [db-spec & {:keys [table opts] :or {table default-table}}]
