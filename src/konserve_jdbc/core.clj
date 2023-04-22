@@ -10,7 +10,7 @@
             [next.jdbc :as jdbc]
             [next.jdbc.result-set :as rs]
             [next.jdbc.connection :as connection]
-            [taoensso.timbre :refer [warn]]
+            [taoensso.timbre :refer [warn debug]]
             [hasch.core :as hasch])
   (:import [java.sql Blob]
            [com.mchange.v2.c3p0 ComboPooledDataSource PooledDataSource] 
@@ -221,7 +221,19 @@
     (if (:sync? env) nil (go-try- nil)))
   (-create-store [_ env]
     (async+sync (:sync? env) *default-sync-translation*
-                (go-try- (jdbc/execute! connection (create-statement (:dbtype db-spec) table)))))
+                (go-try- 
+                  ;; Using CREATE IF NOT EXISTS is regarded as a schema change. To allow the store to be used
+                  ;; where schema changes are not allowed on production e.g. planetscale or the user does have schema permissions,
+                  ;; we test for existence first. This triggers an exception if it doesn't exist which we catch. 
+                  ;; Testing for existence in other ways is not worth the effort as it is specific to the db setup 
+                  ;; not just the type
+                  (let [res (try 
+                              (jdbc/execute! connection [(str "select 1 from " table " limit 1")])
+                              (catch Exception _e 
+                                     (debug (str "Table " table " does not exist. Attempting to create it.")) 
+                                     nil))]
+                    (when (nil? res)                                                      
+                      (jdbc/execute! connection (create-statement (:dbtype db-spec) table)))))))
   (-sync-store [_ env]
     (if (:sync? env) nil (go-try- nil)))
   (-delete-store [_ env]
