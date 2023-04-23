@@ -248,25 +248,30 @@
                                                    {:builder-fn rs/as-unqualified-lower-maps})]
                            (map :id res'))))))
 
-(defn- prepare-jdbcUrl [db]
+(defn- prepare-spec [db]
+  ;; next.jdbc does not officially support the credentials in the format: driver://user:password@host/db
+  ;; it expects auth as query strings or keys in the map form.
   (if-not (contains? db :jdbcUrl)
     db
-    (let [[auth user password] (re-find #"//(.*):(.*)@" (:jdbcUrl db))
-          jdbcUrl (str "jdbc:"
-                    (-> (str/replace (:jdbcUrl db) #"^jdbc:" "") 
+    (let [old-url (:jdbcUrl db)
+          [auth user password] (re-find #"//(.*):(.*)@" old-url)
+          new-url (str "jdbc:"
+                    (-> (if auth (str/replace old-url auth "//") old-url)
+                        (str/replace #"jdbc:" "") 
                         (str/replace "postgres://" "postgresql://")))
-          jdbcUrl (if auth (str/replace jdbcUrl auth "//") jdbcUrl)
-          [_ dbtype] (re-find #"^jdbc:(.*)://" jdbcUrl)
-      ndb (assoc db :jdbcUrl jdbcUrl :dbtype dbtype)]
-      (if (not-any? str/blank? [user password])
-        (assoc ndb :user user :password password)
-        ndb))))
+          [_ dbtype] (re-find #"jdbc:(.*)://" new-url)
+      new-spec (-> db 
+                  (assoc :jdbcUrl new-url)
+                  (assoc :dbtype dbtype)
+                  (conj (when auth [:user user]))
+                  (conj (when auth [:password password])))]
+      new-spec)))
 
 (defn connect-store [db-spec & {:keys [table opts]
                                 :or {table default-table}
                                 :as params}]
-  (let [db-spec (prepare-jdbcUrl db-spec)]
-    
+  (let [db-spec (prepare-spec db-spec)]
+          
     (when-not (:dbtype db-spec)
         (throw (ex-info ":dbtype must be explicitly declared" {:options dbtypes})))
     
@@ -279,7 +284,6 @@
           (.put "com.mchange.v2.log.MLog" "com.mchange.v2.log.slf4j.Slf4jMLog"))) ;; using  Slf4j allows timbre to control logs.
       
     (let [complete-opts (merge {:sync? true} opts)
-          _ (spit "type.log" (str db-spec "\n") :append true)
           db-spec (if (:dbtype db-spec)
                     db-spec
                     (assoc db-spec :dbtype (:subprotocol db-spec)))
@@ -302,12 +306,14 @@
   [store env]
   (async+sync (:sync? env) *default-sync-translation*
               (go-try- 
-                (.close ^ComboPooledDataSource (:connection ^JDBCTable (:backing store)))
+                ;; without this let binding relection still occurs despite the type hint
+                (let [^ComboPooledDataSource conn (:connection ^JDBCTable (:backing store))]
+                  (.close conn))
                 (remove-from-pool (:db-spec ^JDBCTable (:backing store))))))
 
 (defn delete-store [db-spec & {:keys [table opts] :or {table default-table}}]
   (let [complete-opts (merge {:sync? true} opts)
-        connection (jdbc/get-connection db-spec)
+        connection (jdbc/get-connection (prepare-spec db-spec))
         backing (JDBCTable. db-spec connection table)]
     (-delete-store backing complete-opts)))
 
