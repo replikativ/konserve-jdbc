@@ -250,23 +250,22 @@
 
 (defn- prepare-spec [db]
   ;; next.jdbc does not officially support the credentials in the format: driver://user:password@host/db
-  ;; it expects auth as query strings or keys in the map form.
+  ;; connection/uri->db-spec makes is possible but is rough around the edges
+  ;; https://github.com/seancorfield/next-jdbc/issues/229
   (if-not (contains? db :jdbcUrl)
     db
     (let [old-url (:jdbcUrl db)
-          [auth user password] (re-find #"//(.*):(.*)@" old-url)
-          new-url (str "jdbc:"
-                    (-> (if auth (str/replace old-url auth "//") old-url)
-                        (str/replace #"jdbc:" "") 
-                        (str/replace "postgres://" "postgresql://")))
-          [_ dbtype] (re-find #"jdbc:(.*)://" new-url)
-      new-spec (-> db 
-                  (assoc :jdbcUrl new-url)
-                  (assoc :dbtype dbtype)
-                  (conj (when auth [:user user]))
-                  (conj (when auth [:password password])))]
+          spec (connection/uri->db-spec old-url) ;; set port to -1 if none is in the url
+          port (:port spec)
+          new-spec  (-> spec 
+                        (update :dbtype #(str/replace % #"postgres$" "postgresql")) ;the postgres driver does not support long blob
+                        (assoc  :port (if (pos? port) 
+                                          port 
+                                          (-> connection/dbtypes 
+                                              (get (:dbtype spec))
+                                              :port))))]
       new-spec)))
-
+      
 (defn connect-store [db-spec & {:keys [table opts]
                                 :or {table default-table}
                                 :as params}]
