@@ -1,5 +1,5 @@
 (ns konserve-jdbc.core-postgres-test
-  (:require [clojure.test :refer [deftest is testing use-fixtures]]
+  (:require [clojure.test :refer [deftest testing]]
             [clojure.core.async :refer [<!!]]
             [konserve.compliance-test :refer [compliance-test]]
             [konserve-jdbc.core :refer [connect-store release delete-store]]))
@@ -11,6 +11,9 @@
    :user "alice"
    :password "foo"})
 
+(def db-url
+  {:jdbcUrl "postgres://alice:foo@localhost/config-test"})
+
 (deftest jdbc-compliance-sync-test
   (let [_ (delete-store db-spec :table "compliance_test"  :opts {:sync? true})
         store  (connect-store db-spec :table "compliance_test" :opts {:sync? true})]
@@ -20,9 +23,9 @@
     (delete-store db-spec :opts {:sync? true})))
 
 (deftest jdbc-compliance-async-test
-  (let [_ (<!! (delete-store db-spec :table "compliance_test"  :opts {:sync? false}))
-        store (<!! (connect-store db-spec :table "compliance_test" :opts {:sync? false}))]
+  (let [_ (<!! (delete-store db-url :table "compliance_test"  :opts {:sync? false}))
+        store (<!! (connect-store db-url :table "compliance_test" :opts {:sync? false}))]
     (testing "Compliance test with asynchronous store"
       (compliance-test store))
     (<!! (release store {:sync? false}))
-    (<!! (delete-store db-spec :opts {:sync? false}))))
+    (<!! (delete-store db-url :opts {:sync? false}))))
