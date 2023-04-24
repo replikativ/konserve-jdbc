@@ -11,7 +11,8 @@
             [next.jdbc.result-set :as rs]
             [next.jdbc.connection :as connection]
             [taoensso.timbre :refer [warn debug]]
-            [hasch.core :as hasch])
+            [hasch.core :as hasch]
+            [clojure.string :as str])
   (:import [java.sql Blob]
            [com.mchange.v2.c3p0 ComboPooledDataSource PooledDataSource] 
            (java.io ByteArrayInputStream)
@@ -247,37 +248,56 @@
                                                    {:builder-fn rs/as-unqualified-lower-maps})]
                            (map :id res'))))))
 
+(defn- prepare-spec [db]
+  ;; next.jdbc does not officially support the credentials in the format: driver://user:password@host/db
+  ;; connection/uri->db-spec makes is possible but is rough around the edges
+  ;; https://github.com/seancorfield/next-jdbc/issues/229
+  (if-not (contains? db :jdbcUrl)
+    db
+    (let [old-url (:jdbcUrl db)
+          spec (connection/uri->db-spec old-url) ;; set port to -1 if none is in the url
+          port (:port spec)
+          new-spec  (-> spec 
+                        (update :dbtype #(str/replace % #"postgres$" "postgresql")) ;the postgres driver does not support long blob
+                        (assoc  :port (if (pos? port) 
+                                          port 
+                                          (-> connection/dbtypes 
+                                              (get (:dbtype spec))
+                                              :port))))]
+      new-spec)))
+
 (defn connect-store [db-spec & {:keys [table opts]
                                 :or {table default-table}
                                 :as params}]
-  (when-not (:dbtype db-spec)
-      (throw (ex-info ":dbtype must be explicitly declared" {:options dbtypes})))
-  
-  (when-not (supported-dbtypes (:dbtype db-spec))
-    (warn "Unsupported database type " (:dbtype db-spec)
-          " - full functionality of store is only guaranteed for following database types: "  supported-dbtypes))
-
-  (System/setProperties 
-      (doto (java.util.Properties. (System/getProperties))
-        (.put "com.mchange.v2.log.MLog" "com.mchange.v2.log.slf4j.Slf4jMLog"))) ;; using  Slf4j allows timbre to control logs.
+  (let [db-spec (prepare-spec db-spec)]                                
+    (when-not (:dbtype db-spec)
+        (throw (ex-info ":dbtype must be explicitly declared" {:options dbtypes})))
     
-  (let [complete-opts (merge {:sync? true} opts)
-        db-spec (if (:dbtype db-spec)
-                  db-spec
-                  (assoc db-spec :dbtype (:subprotocol db-spec)))
-        db-spec (assoc db-spec :sync? (:sync? complete-opts))
-        ^PooledDataSource connection (get-connection db-spec)
-        backing (JDBCTable. db-spec connection table)
-        config (merge {:opts               complete-opts
-                       :config             {:sync-blob? true
-                                            :in-place? true
-                                            :lock-blob? true}
-                       :default-serializer :FressianSerializer
-                       :compressor         null-compressor
-                       :encryptor          null-encryptor
-                       :buffer-size        (* 1024 1024)}
-                      (dissoc params :opts :config))]
-    (connect-default-store backing config)))
+    (when-not (supported-dbtypes (:dbtype db-spec))
+      (warn "Unsupported database type " (:dbtype db-spec)
+            " - full functionality of store is only guaranteed for following database types: "  supported-dbtypes))
+
+    (System/setProperties 
+        (doto (java.util.Properties. (System/getProperties))
+          (.put "com.mchange.v2.log.MLog" "com.mchange.v2.log.slf4j.Slf4jMLog"))) ;; using  Slf4j allows timbre to control logs.
+      
+    (let [complete-opts (merge {:sync? true} opts)
+          db-spec (if (:dbtype db-spec)
+                    db-spec
+                    (assoc db-spec :dbtype (:subprotocol db-spec)))
+          db-spec (assoc db-spec :sync? (:sync? complete-opts))
+          ^PooledDataSource connection (get-connection db-spec)
+          backing (JDBCTable. db-spec connection table)
+          config (merge {:opts               complete-opts
+                        :config             {:sync-blob? true
+                                              :in-place? true
+                                              :lock-blob? true}
+                        :default-serializer :FressianSerializer
+                        :compressor         null-compressor
+                        :encryptor          null-encryptor
+                        :buffer-size        (* 1024 1024)}
+                        (dissoc params :opts :config))]
+      (connect-default-store backing config))))
 
 (defn release
   "Must be called after work on database has finished in order to close connection"
@@ -289,7 +309,7 @@
 
 (defn delete-store [db-spec & {:keys [table opts] :or {table default-table}}]
   (let [complete-opts (merge {:sync? true} opts)
-        connection (jdbc/get-connection db-spec)
+        connection (jdbc/get-connection (prepare-spec db-spec))
         backing (JDBCTable. db-spec connection table)]
     (-delete-store backing complete-opts)))
 
