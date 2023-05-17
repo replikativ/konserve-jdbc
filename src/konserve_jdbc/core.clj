@@ -14,7 +14,7 @@
             [hasch.core :as hasch]
             [clojure.string :as str])
   (:import [java.sql Blob]
-           [com.mchange.v2.c3p0 ComboPooledDataSource PooledDataSource] 
+           [com.mchange.v2.c3p0 ComboPooledDataSource PooledDataSource]
            (java.io ByteArrayInputStream)
            (java.sql Connection)))
 
@@ -30,19 +30,19 @@
 ;; each unique spec will have its own pool
 (defn- pool-key [db-spec]
   (keyword
-    (str (hasch/uuid  (select-keys db-spec [:dbtype :jdbcUrl :host :port :user :password :dbname :sync?])))))
+   (str (hasch/uuid  (select-keys db-spec [:dbtype :jdbcUrl :host :port :user :password :dbname :sync?])))))
 
 (defn get-connection [db-spec]
   (let [id (pool-key db-spec)
         conn (get @pool id)]
-    (if-not (nil? conn) 
+    (if-not (nil? conn)
       conn
       (let [conns ^PooledDataSource (connection/->pool ComboPooledDataSource db-spec)
-            shutdown (fn [] (.close ^PooledDataSource conns))] 
+            shutdown (fn [] (.close ^PooledDataSource conns))]
         (swap! pool assoc id conns)
         (.close (jdbc/get-connection conns))
-        (.addShutdownHook (Runtime/getRuntime) 
-          (Thread. ^Runnable shutdown))
+        (.addShutdownHook (Runtime/getRuntime)
+                          (Thread. ^Runnable shutdown))
         conns))))
 
 (defn remove-from-pool [db-spec]
@@ -222,19 +222,19 @@
     (if (:sync? env) nil (go-try- nil)))
   (-create-store [_ env]
     (async+sync (:sync? env) *default-sync-translation*
-                (go-try- 
+                (go-try-
                   ;; Using CREATE IF NOT EXISTS is regarded as a schema change. To allow the store to be used
                   ;; where schema changes are not allowed on production e.g. planetscale or the user does have schema permissions,
                   ;; we test for existence first. This triggers an exception if it doesn't exist which we catch. 
                   ;; Testing for existence in other ways is not worth the effort as it is specific to the db setup 
                   ;; not just the type
-                  (let [res (try 
-                              (jdbc/execute! connection [(str "select 1 from " table " limit 1")])
-                              (catch Exception _e 
-                                     (debug (str "Table " table " does not exist. Attempting to create it.")) 
-                                     nil))]
-                    (when (nil? res)                                                      
-                      (jdbc/execute! connection (create-statement (:dbtype db-spec) table)))))))
+                 (let [res (try
+                             (jdbc/execute! connection [(str "select 1 from " table " limit 1")])
+                             (catch Exception _e
+                               (debug (str "Table " table " does not exist. Attempting to create it."))
+                               nil))]
+                   (when (nil? res)
+                     (jdbc/execute! connection (create-statement (:dbtype db-spec) table)))))))
   (-sync-store [_ env]
     (if (:sync? env) nil (go-try- nil)))
   (-delete-store [_ env]
@@ -257,30 +257,30 @@
     (let [old-url (:jdbcUrl db)
           spec (connection/uri->db-spec old-url) ;; set port to -1 if none is in the url
           port (:port spec)
-          new-spec  (-> spec 
+          new-spec  (-> spec
                         (update :dbtype #(str/replace % #"postgres$" "postgresql")) ;the postgres driver does not support long blob
-                        (assoc  :port (if (pos? port) 
-                                          port 
-                                          (-> connection/dbtypes 
-                                              (get (:dbtype spec))
-                                              :port))))]
+                        (assoc  :port (if (pos? port)
+                                        port
+                                        (-> connection/dbtypes
+                                            (get (:dbtype spec))
+                                            :port))))]
       new-spec)))
 
 (defn connect-store [db-spec & {:keys [table opts]
                                 :or {table default-table}
                                 :as params}]
-  (let [db-spec (prepare-spec db-spec)]                                
+  (let [db-spec (prepare-spec db-spec)]
     (when-not (:dbtype db-spec)
-        (throw (ex-info ":dbtype must be explicitly declared" {:options dbtypes})))
-    
+      (throw (ex-info ":dbtype must be explicitly declared" {:options dbtypes})))
+
     (when-not (supported-dbtypes (:dbtype db-spec))
       (warn "Unsupported database type " (:dbtype db-spec)
             " - full functionality of store is only guaranteed for following database types: "  supported-dbtypes))
 
-    (System/setProperties 
-        (doto (java.util.Properties. (System/getProperties))
-          (.put "com.mchange.v2.log.MLog" "com.mchange.v2.log.slf4j.Slf4jMLog"))) ;; using  Slf4j allows timbre to control logs.
-      
+    (System/setProperties
+     (doto (java.util.Properties. (System/getProperties))
+       (.put "com.mchange.v2.log.MLog" "com.mchange.v2.log.slf4j.Slf4jMLog"))) ;; using  Slf4j allows timbre to control logs.
+
     (let [complete-opts (merge {:sync? true} opts)
           db-spec (if (:dbtype db-spec)
                     db-spec
@@ -289,13 +289,13 @@
           ^PooledDataSource connection (get-connection db-spec)
           backing (JDBCTable. db-spec connection table)
           config (merge {:opts               complete-opts
-                        :config             {:sync-blob? true
+                         :config             {:sync-blob? true
                                               :in-place? true
                                               :lock-blob? true}
-                        :default-serializer :FressianSerializer
-                        :compressor         null-compressor
-                        :encryptor          null-encryptor
-                        :buffer-size        (* 1024 1024)}
+                         :default-serializer :FressianSerializer
+                         :compressor         null-compressor
+                         :encryptor          null-encryptor
+                         :buffer-size        (* 1024 1024)}
                         (dissoc params :opts :config))]
       (connect-default-store backing config))))
 
@@ -303,9 +303,9 @@
   "Must be called after work on database has finished in order to close connection"
   [store env]
   (async+sync (:sync? env) *default-sync-translation*
-              (go-try- 
-                (.close ^PooledDataSource (:connection ^JDBCTable (:backing store)))
-                (remove-from-pool (:db-spec ^JDBCTable (:backing store))))))
+              (go-try-
+               (.close ^PooledDataSource (:connection ^JDBCTable (:backing store)))
+               (remove-from-pool (:db-spec ^JDBCTable (:backing store))))))
 
 (defn delete-store [db-spec & {:keys [table opts] :or {table default-table}}]
   (let [complete-opts (merge {:sync? true} opts)
