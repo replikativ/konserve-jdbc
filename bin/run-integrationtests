@@ -7,13 +7,13 @@ trap teardown EXIT
 
 function setup() {
     if [ -z ${CIRCLECI} ]; then
-        echo $(sudo docker-compose -f ./docker-compose.yml up --detach)
+        echo $(docker-compose -f ./docker-compose.yml up --detach)
     fi
 }
 
 function teardown() {
     if [ -z ${CIRCLECI} ]; then
-        sudo docker-compose -f ./docker-compose.yml down
+        docker-compose -f ./docker-compose.yml down
     fi
 }
 
