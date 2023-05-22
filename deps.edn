@@ -1,6 +1,6 @@
 {:paths ["src"]
  :deps {com.h2database/h2 {:mvn/version "2.1.214"}
-        com.microsoft.sqlserver/mssql-jdbc {:mvn/version "12.2.0.jre11"}
+        com.microsoft.sqlserver/mssql-jdbc {:mvn/version "9.4.1.jre11"}
         com.taoensso/timbre {:mvn/version "6.1.0"}
         com.fzakaria/slf4j-timbre {:mvn/version "0.3.21"}
         io.replikativ/konserve {:mvn/version "0.7.311"}
