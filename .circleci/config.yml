@@ -10,6 +10,9 @@ jobs:
       build_cljs:
         type: boolean
         default: false
+      jarname:
+        type: string
+        default: "library"
     steps:
       - attach_workspace:
           at: /home/circleci
@@ -30,7 +33,7 @@ jobs:
       - persist_to_workspace:
           root: /home/circleci/
           paths:
-            - replikativ/replikativ-konserve-jdbc.jar
+            - replikativ/replikativ-<<parameters.jarname>>.jar
 
 workflows:
   build-test-and-deploy:
@@ -47,6 +50,7 @@ workflows:
           requires:
             - tools/setup
       - build:
+          jarname: "konserve-jdbc"
           build_cljs: false
           context: dockerhub-deploy
           requires:
