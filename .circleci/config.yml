@@ -3,81 +3,42 @@ version: 2.1
 orbs:
   tools: replikativ/clj-tools@0
 
-jobs:
-  build:
-    executor: tools/clojurecli
-    parameters:
-      build_cljs:
-        type: boolean
-        default: false
-      jarname:
-        type: string
-        default: "library"
-    steps:
-      - attach_workspace:
-          at: /home/circleci
-      - run:
-          name: Update pom
-          command: clojure -X:deps mvn-pom
-      - run:
-          name: Build
-          command: clojure -M:jar
-          no_output_timeout: 5m
-      - when:
-          condition: <<parameters.build_cljs>>
-          steps:
-            - run:
-                name: compile_cljs
-                command: npx shadow-cljs compile ci
-                no_output_timeout: 5m
-      - persist_to_workspace:
-          root: /home/circleci/
-          paths:
-            - replikativ/replikativ-<<parameters.jarname>>.jar
-
 workflows:
   build-test-and-deploy:
     jobs:
       - tools/setup:
-          context: dockerhub-deploy
+          context: docker-deploy
           setup_cljs: false
+      - tools/build:
+          context: docker-deploy
+          build_cljs: false
+          requires:
+            - tools/setup
       - tools/format:
-          context: dockerhub-deploy
+          context: docker-deploy
           requires:
             - tools/setup
       - tools/integrationtest-postgresql-mysql-mssql:
-          context: dockerhub-deploy
+          context: docker-deploy
           requires:
-            - tools/setup
-      - build:
-          jarname: "konserve-jdbc"
-          build_cljs: false
-          context: dockerhub-deploy
-          requires:
-            - tools/setup
-      - tools/deploy-snapshot:
-          jarname: "konserve-jdbc"
+            - tools/format
+            - tools/build
+      - tools/deploy:
           context:
             - clojars-deploy
-            - dockerhub-deploy
+            - docker-deploy
           filters:
             branches:
-              only: development
+              only: main
           requires:
-            - tools/setup
-            - tools/format
             - tools/integrationtest-postgresql-mysql-mssql
-            - build
-      - tools/deploy-release:
-          jarname: "konserve-jdbc"
+      - tools/release:
           context:
-            - clojars-deploy
-            - dockerhub-deploy
+            - github-token
+            - docker-deploy
           filters:
             branches:
-              only: master
+              only: main
           requires:
-            - tools/setup
-            - tools/format
-            - tools/integrationtest-postgresql-mysql-mssql
-            - build
+            - tools/deploy
+

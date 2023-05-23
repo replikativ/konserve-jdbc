@@ -4,7 +4,6 @@
   <packaging>jar</packaging>
   <groupId>io.replikativ</groupId>
   <artifactId>konserve-jdbc</artifactId>
-  <version>0.1.4</version>
   <description>A generic JDBC backend for konserve.</description>
   <build>
     <sourceDirectory>src</sourceDirectory>
