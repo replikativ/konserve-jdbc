@@ -76,8 +76,12 @@ Add to your dependencies:
 
 ## Supported Databases
 
-Not all databases available for JDBC have been tested to work with this implementation. 
-Other databases might still work, but there is no guarantee. 
+**BREAKING CHANGE**: konserve-jdbc versions after `0b68d31` no longer include
+actual JDBC drivers. Before you upgrade please make sure your application
+provides the necessary dependencies.
+
+Not all databases available for JDBC have been tested to work with this implementation.
+Other databases might still work, but there is no guarantee.
 If you are interested in another database, please feel free to contact us.
 
 Fully supported so far are the following databases:
