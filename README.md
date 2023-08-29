@@ -76,7 +76,7 @@ Add to your dependencies:
 
 ## Supported Databases
 
-**BREAKING CHANGE**: konserve-jdbc versions after `0b68d31` no longer include
+**BREAKING CHANGE**: konserve-jdbc versions after `0.1.79` no longer include
 actual JDBC drivers. Before you upgrade please make sure your application
 provides the necessary dependencies.
 
