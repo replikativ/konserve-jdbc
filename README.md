@@ -81,7 +81,8 @@ actual JDBC drivers. Before you upgrade please make sure your application
 provides the necessary dependencies.
 
 Not all databases available for JDBC have been tested to work with this implementation.
-Other databases might still work, but there is no guarantee.
+Other databases might still work, but there is no guarantee. Please see working
+drivers in the dev-alias in the `deps.edn` file.
 If you are interested in another database, please feel free to contact us.
 
 Fully supported so far are the following databases:
