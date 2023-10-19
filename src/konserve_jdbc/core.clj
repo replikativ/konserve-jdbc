@@ -179,10 +179,10 @@
     (if (:sync? env) true (go-try- true)))                       ;; May not return nil, otherwise eternal retries
   (-read-header [_ env]
     (async+sync (:sync? env) *default-sync-translation*
-                (go-try- 
-                  (when-not @cache
-                    (reset! cache (read-all (:dbtype (:db-spec table)) (:connection table) (:table table) key)))
-                  (-> @cache :header))))
+                (go-try-
+                 (when-not @cache
+                   (reset! cache (read-all (:dbtype (:db-spec table)) (:connection table) (:table table) key)))
+                 (-> @cache :header))))
   (-read-meta [_ _meta-size env]
     (async+sync (:sync? env) *default-sync-translation*
                 (go-try- (-> @cache :meta))))
