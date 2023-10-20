@@ -277,9 +277,9 @@
       new-spec)))
 
 (defn connect-store [db-spec & {:keys [table opts]
-                                :or {table default-table}
                                 :as params}]
-  (let [db-spec (prepare-spec db-spec)]
+  (let [table (or table (:table db-spec) default-table)
+        db-spec (prepare-spec db-spec)]
     (when-not (:dbtype db-spec)
       (throw (ex-info ":dbtype must be explicitly declared" {:options dbtypes})))
 
@@ -309,6 +309,8 @@
                         (dissoc params :opts :config))]
       (connect-default-store backing config))))
 
+(def connect-jdbc-store connect-store) ;; this is the new standard approach for store. Old signature remains for backwards compatability. 
+
 (defn release
   "Must be called after work on database has finished in order to close connection"
   [store env]
@@ -317,8 +319,9 @@
                (.close ^PooledDataSource (:connection ^JDBCTable (:backing store)))
                (remove-from-pool (:db-spec ^JDBCTable (:backing store))))))
 
-(defn delete-store [db-spec & {:keys [table opts] :or {table default-table}}]
+(defn delete-store [db-spec & {:keys [table opts]}]
   (let [complete-opts (merge {:sync? true} opts)
+        table (or table (:table db-spec) default-table)
         connection (jdbc/get-connection (prepare-spec db-spec))
         backing (JDBCTable. db-spec connection table)]
     (-delete-store backing complete-opts)))
