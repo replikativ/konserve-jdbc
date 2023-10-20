@@ -299,6 +299,8 @@
                         (dissoc params :opts :config))]
       (connect-default-store backing config))))
 
+(def connect-jdbc-store connect-store) ;; this is the new standard approach for store. Old signature remains for backwards compatability. 
+
 (defn release
   "Must be called after work on database has finished in order to close connection"
   [store env]

@@ -73,6 +73,45 @@ Add to your dependencies:
                             (map byte (slurp input-stream)))
             {:sync? false}))
 ```
+## Multitenancy
+To enable the use of the same JDBC database for multiple stores all jdbc specs accept a table name.
+The table can specified separately or passed in the `db-spec`. 
+
+``` clojure
+(def pg-cfg  {:dbtype  "postgresql"
+              :jdbcUrl "postgresql://user:password@localhost/konserve"})
+
+(def store-a (connect-jdbc-store pg-cfg :table "this_application" :opts {:sync? true}))
+(def store-b (connect-jdbc-store pg-cfg :table "that_application" :opts {:sync? true}))
+
+(def pg-cfg-a  {:dbtype  "postgresql"
+                :jdbcUrl "postgresql://user:password@localhost/konserve"
+                :table   "this_application"})
+
+
+(def pg-cfg-b  {:dbtype  "postgresql"
+                :jdbcUrl "postgresql://user:password@localhost/konserve"
+                :table   "that_application"})
+
+
+(def also-store-a (connect-jdbc-store pg-cfg-a :opts {:sync? true}))
+(def also-store-b (connect-jdbc-store pg-cfg-b :opts {:sync? true}))
+```
+In terms of priority a table specified using the keyword argument takes priority, followed
+by the one specified in the `db-spec`. If no table is specified `konserve` is used as the table name.
+
+``` clojure
+(def cfg-a  {:dbtype  "postgresql"
+             :jdbcUrl "postgresql://user:password@localhost/konserve"})
+
+(def cfg-b  {:dbtype  "postgresql"
+             :jdbcUrl "postgresql://user:password@localhost/konserve"
+             :table   "water"})
+
+(def store-a (connect-jdbc-store cfg-a :opts {:sync? true})) ;; table name => konserve
+(def store-b (connect-jdbc-store cfg-b :opts {:sync? true}))  ;; table name => water 
+(def store-c (connect-jdbc-store cfg-b :table "fire" :opts {:sync? true})) ;;table name => fire
+``````
 
 ## Supported Databases
 
@@ -90,21 +129,27 @@ Fully supported so far are the following databases:
 1) PostgreSQL
 
 ``` clojure
-(def pg {:dbtype "postgresql"
-         :dbname "konserve"
-         :host "localhost"
-         :user "konserve"
-         :password "password"})
+(def pg-cfg  {:dbtype "postgresql"
+              :dbname "konserve"
+              :host "localhost"
+              :user "user"
+              :password "password"})
+
+(def pg-url  {:dbtype  "postgresql"
+              :jdbcUrl "postgresql://user:password@localhost/konserve"})
 ```
 
 2) MySQL
 
 ``` clojure
-(def mysql {:dbtype "mysql"
-            :dbname "konserve"
-            :host "localhost"
-            :user "konserve"
-            :password "password"})
+(def mysql-cfg {:dbtype "mysql"
+                :dbname "konserve"
+                :host "localhost"
+                :user "user"
+                :password "password"})
+
+(def mysql-url {:dbtype  "mysql"
+                :jdbcUrl "mysql://user:password@localhost/konserve"})
 ```
 
 3) SQlite
