@@ -275,7 +275,7 @@
                                             (get (:dbtype spec))
                                             :port))))
           final-jdbc-url (-> new-spec connection/jdbc-url)
-          final-spec (assoc db :jdbcUrl final-jdbc-url :dbtype (:dbtype new-spec))]; (str (when-not (str/blank? options) "&") options))]
+          final-spec (assoc db :jdbcUrl final-jdbc-url :dbtype (:dbtype new-spec))]
       final-spec)))
 
 (defn connect-store [db-spec & {:keys [table opts]
