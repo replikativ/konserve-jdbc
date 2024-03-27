@@ -14,6 +14,9 @@
 (def jdbc-url
   {:jdbcUrl "postgresql://alice:foo@localhost/config-test"})
 
+(def jdbc-url-2
+  {:jdbcUrl "postgresql://alice:foo@localhost/config-test?sslmode=disable"})
+
 (deftest jdbc-compliance-sync-test
   (let [_ (delete-store db-spec :table "compliance_test"  :opts {:sync? true})
         store  (connect-store db-spec :table "compliance_test" :opts {:sync? true})]
@@ -33,6 +36,14 @@
 (deftest jdbc-url-test
   (let [_ (delete-store jdbc-url :table "compliance_test" :opts {:sync? true})
         store  (connect-store jdbc-url :table "compliance_test" :opts {:sync? true})]
+    (testing "Compliance test with synchronous store"
+      (compliance-test store))
+    (release store {:sync? true})
+    (delete-store jdbc-url :opts {:sync? true})))
+
+(deftest jdbc-url-test-with-options
+  (let [_ (delete-store jdbc-url-2 :table "compliance_test" :opts {:sync? true})
+        store  (connect-store jdbc-url-2 :table "compliance_test" :opts {:sync? true})]
     (testing "Compliance test with synchronous store"
       (compliance-test store))
     (release store {:sync? true})

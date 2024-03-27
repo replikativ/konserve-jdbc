@@ -10,7 +10,7 @@
             [next.jdbc :as jdbc]
             [next.jdbc.result-set :as rs]
             [next.jdbc.connection :as connection]
-            [taoensso.timbre :refer [warn debug]]
+            [taoensso.timbre :refer [warn debug] :as timbre]
             [hasch.core :as hasch]
             [clojure.string :as str])
   (:import [java.sql Blob]
@@ -273,8 +273,10 @@
                                         port
                                         (-> connection/dbtypes
                                             (get (:dbtype spec))
-                                            :port))))]
-      new-spec)))
+                                            :port))))
+          final-jdbc-url (-> new-spec connection/jdbc-url)
+          final-spec (assoc db :jdbcUrl final-jdbc-url :dbtype (:dbtype new-spec))]; (str (when-not (str/blank? options) "&") options))]
+      final-spec)))
 
 (defn connect-store [db-spec & {:keys [table opts]
                                 :as params}]
