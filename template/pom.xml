@@ -14,4 +14,10 @@
       <url>https://repo.clojars.org/</url>
     </repository>
   </repositories>
+  <licenses>
+    <license>
+      <name>Eclipse</name>
+      <url>https://www.eclipse.org/legal/epl-v20.html</url>
+    </license>
+  </licenses>
 </project>
