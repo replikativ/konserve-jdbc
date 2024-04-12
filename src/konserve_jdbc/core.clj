@@ -258,7 +258,7 @@
                                                    {:builder-fn rs/as-unqualified-lower-maps})]
                            (map :id res'))))))
 
-(defn- prepare-spec [db]
+(defn prepare-spec [db]
   ;; next.jdbc does not officially support the credentials in the format: driver://user:password@host/db
   ;; connection/uri->db-spec makes is possible but is rough around the edges
   ;; https://github.com/seancorfield/next-jdbc/issues/229
