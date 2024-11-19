@@ -303,6 +303,7 @@
           config (merge {:opts               complete-opts
                          :config             {:sync-blob? true
                                               :in-place? true
+                                              :no-backup? true
                                               :lock-blob? true}
                          :default-serializer :FressianSerializer
                          :compressor         null-compressor
