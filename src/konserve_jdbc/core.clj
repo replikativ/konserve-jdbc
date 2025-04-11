@@ -1,7 +1,8 @@
 (ns konserve-jdbc.core
   "Address globally aggregated immutable key-value stores(s)."
   (:require [konserve.impl.defaults :refer [connect-default-store]]
-            [konserve.impl.storage-layout :refer [PBackingStore PBackingBlob PBackingLock -delete-store]]
+            [konserve.impl.storage-layout :refer [PBackingStore PBackingBlob PBackingLock 
+                                                 PMultiWriteBackingStore -delete-store]]
             [konserve.compressor :refer [null-compressor]]
             [konserve.encryptor :refer [null-encryptor]]
             [konserve.utils :refer [async+sync *default-sync-translation*]]
@@ -256,7 +257,27 @@
                 (go-try- (let [res' (jdbc/execute! connection
                                                    [(str "SELECT id FROM " table ";")]
                                                    {:builder-fn rs/as-unqualified-lower-maps})]
-                           (map :id res'))))))
+                           (map :id res')))))
+  
+  ;; Implementation for atomic multi-key writes
+  PMultiWriteBackingStore
+  (-multi-write-blobs [this store-key-values env]
+    (async+sync (:sync? env) *default-sync-translation*
+      (go-try-
+        (jdbc/with-transaction [tx connection]
+          (let [results (reduce (fn [results [store-key data]]
+                                  (let [{:keys [header meta value]} data
+                                        db-type (:dbtype db-spec)
+                                        ps (update-statement db-type table 
+                                                            store-key header meta value)
+                                        exec-result (jdbc/execute! tx ps)
+                                        success (if (number? (first exec-result))
+                                                 (pos? (first exec-result))
+                                                 true)] ;; successful execute! returns different values in different JDBC drivers
+                                    (assoc results store-key success)))
+                                {}
+                                store-key-values)]
+            results))))))
 
 (defn- prepare-spec [db]
   ;; next.jdbc does not officially support the credentials in the format: driver://user:password@host/db

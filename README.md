@@ -29,6 +29,11 @@ Add to your dependencies:
 (k/get-in store [:bar] nil {:sync? true})
 (k/dissoc store :bar {:sync? true})
 
+;; Multi-key atomic operations
+(k/multi-assoc store {:user1 {:name "Alice"} 
+                       :user2 {:name "Bob"}} 
+                {:sync? true})
+
 (k/append store :error-log {:type :horrible} {:sync? true})
 (k/log store :error-log {:sync? true})
 
@@ -64,6 +69,10 @@ Add to your dependencies:
 (<! (k/update-in store [:bar] inc))
 (<! (k/get-in store [:bar]))
 (<! (k/dissoc store :bar))
+
+;; Multi-key atomic operations
+(<! (k/multi-assoc store {:user1 {:name "Alice"} 
+                           :user2 {:name "Bob"}}))
 
 (<! (k/append store :error-log {:type :horrible}))
 (<! (k/log store :error-log))
@@ -112,6 +121,23 @@ by the one specified in the `db-spec`. If no table is specified `konserve` is us
 (def store-b (connect-jdbc-store cfg-b :opts {:sync? true}))  ;; table name => water 
 (def store-c (connect-jdbc-store cfg-b :table "fire" :opts {:sync? true})) ;;table name => fire
 ``````
+
+## Multi-key Operations
+
+This backend supports atomic multi-key operations through the `multi-assoc` function, which allows you to update multiple keys in a single atomic transaction. This ensures that either all operations succeed or all fail (ACID guarantees).
+
+``` clojure
+;; Update multiple keys atomically in a single transaction
+(k/multi-assoc store {:user1 {:name "Alice"} 
+                      :user2 {:name "Bob"}} 
+               {:sync? true})
+
+;; Or asynchronously
+(<! (k/multi-assoc store {:user1 {:name "Alice"} 
+                          :user2 {:name "Bob"}}))
+```
+
+The implementation uses JDBC transactions to ensure atomicity, making it suitable for use cases that require strong consistency guarantees across multiple keys.
 
 ## Supported Databases
 
