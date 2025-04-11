@@ -80,4 +80,4 @@
               :version version
               :jar-file jar-file
               :class-dir class-dir}))
- 
+
