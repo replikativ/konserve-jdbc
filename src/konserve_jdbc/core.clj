@@ -137,6 +137,12 @@
           "END;")]
     [(str "DROP TABLE IF EXISTS " table)]))
 
+(defn offset-query [db-type table offset]
+  (case db-type
+    ("mssql" "sqlserver")
+    [(str "SELECT TOP (?) id FROM " table " WHERE id > ? ORDER BY id;") 25000 offset]
+    [(str "SELECT id FROM " table " WHERE id > ? ORDER BY id LIMIT ?;") offset 25000]))
+
 (defn change-row-id [connection table from to]
   (jdbc/execute! connection
                  ["UPDATE " table " SET id = '" to "' WHERE id = '" from "';"]))
@@ -263,7 +269,7 @@
                            (lazy-seq
                             (let [rows (into []
                                              (map :id)
-                                             (jdbc/plan connection [(str "SELECT id FROM " table " WHERE id > ? ORDER BY id LIMIT ?;") offset 25000]))]
+                                             (jdbc/plan connection (offset-query (:dbtype db-spec) table offset)))]
                               (when (seq rows)
                                 (concat rows (fetch-batch (last rows)))))))]
                    (fetch-batch "")))))
