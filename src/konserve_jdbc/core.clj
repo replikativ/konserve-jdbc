@@ -254,10 +254,19 @@
                          (.close ^Connection connection))))
   (-keys [_ env]
     (async+sync (:sync? env) *default-sync-translation*
-                (go-try- (let [res' (jdbc/execute! connection
-                                                   [(str "SELECT id FROM " table ";")]
-                                                   {:builder-fn rs/as-unqualified-lower-maps})]
-                           (map :id res')))))
+                (go-try-
+                  (letfn [(fetch-batch [offset]
+                            ;; We need to lazily load rows as the entire result set cannot be loaded into memory
+                            ;; The OFFSET/LIMIT approach degrades as the number of rows increases
+                            ;; We use lexicographic ordering to sort on the id which is indexed giving faster performance
+                            ;; 25000 is a arbitrary number of rows to fetch at a time
+                            (lazy-seq
+                              (let [rows (into [] 
+                                            (map :id)
+                                            (jdbc/plan connection [(str "SELECT id FROM " table " WHERE id > ? ORDER BY id LIMIT ?;") offset 25000]))]
+                                (when (seq rows)
+                                  (concat rows (fetch-batch (last rows)))))))]
+                    (fetch-batch "")))))
 
   ;; Implementation for atomic multi-key writes
   PMultiWriteBackingStore
