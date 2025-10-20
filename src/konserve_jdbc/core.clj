@@ -102,32 +102,37 @@
   (case db-type
     "h2"
     [(str "MERGE INTO " table " (id, header, meta, val) "
-          "SELECT '" to "', header, meta, val FROM " table "  WHERE id = '" from "';")]
+          "SELECT ?, header, meta, val FROM " table " WHERE id = ?;")
+     to from]
     ("postgresql" "sqlite")
     [(str "INSERT INTO " table " (id, header, meta, val) "
-          "SELECT '" to "', header, meta, val FROM " table "  WHERE id = '" from "' "
+          "SELECT ?, header, meta, val FROM " table " WHERE id = ? "
           "ON CONFLICT (id) DO UPDATE "
-          "SET header = excluded.header, meta = excluded.meta, val = excluded.val;")]
+          "SET header = excluded.header, meta = excluded.meta, val = excluded.val;")
+     to from]
     ("mssql" "sqlserver")
     [(str "MERGE dbo." table " WITH (HOLDLOCK) AS tgt "
-          "USING (SELECT '" to "', header, meta, val FROM " table " WHERE id = '" from "') "
+          "USING (SELECT ?, header, meta, val FROM " table " WHERE id = ?) "
           "AS new (id, header, meta, val) "
-          "ON (tgt.id = new.id)"
+          "ON (tgt.id = new.id) "
           "WHEN MATCHED THEN UPDATE "
           "SET tgt.header = new.header, tgt.meta = new.meta, tgt.val = new.val "
           "WHEN NOT MATCHED THEN "
-          "INSERT (id, header, meta, val) VALUES (new.id, new.header, new.meta, new.val);")]
+          "INSERT (id, header, meta, val) VALUES (new.id, new.header, new.meta, new.val);")
+     to from]
     "mysql"
     [(str "REPLACE INTO " table " (id, header, meta, val) "
-          "SELECT '" to "', header, meta, val FROM " table  " WHERE id = '" from "';")]
+          "SELECT ?, header, meta, val FROM " table " WHERE id = ?;")
+     to from]
     [(str "MERGE INTO " table " AS tgt "
-          "USING (SELECT '" to "', header, meta, val FROM " table " WHERE id = '" from "') "
+          "USING (SELECT ?, header, meta, val FROM " table " WHERE id = ?) "
           "AS new (id, header, meta, val) "
-          "ON (tgt.id = new.id)"
+          "ON (tgt.id = new.id) "
           "WHEN MATCHED THEN UPDATE "
           "SET tgt.header = new.header, tgt.meta = new.meta, tgt.val = new.val "
           "WHEN NOT MATCHED THEN "
-          "INSERT (id, header, meta, val) VALUES (new.id, new.header, new.meta, new.val);")]))
+          "INSERT (id, header, meta, val) VALUES (new.id, new.header, new.meta, new.val);")
+     to from]))
 
 (defn delete-statement [db-type table]
   (case db-type
@@ -145,11 +150,11 @@
 
 (defn change-row-id [connection table from to]
   (jdbc/execute! connection
-                 ["UPDATE " table " SET id = '" to "' WHERE id = '" from "';"]))
+                 [(str "UPDATE " table " SET id = ? WHERE id = ?;") to from]))
 
 (defn read-field [db-type connection table id column & {:keys [binary? locked-cb] :or {binary? false}}]
   (let [res (-> (jdbc/execute! connection
-                               [(str "SELECT id," (name column) " FROM " table " WHERE id = '" id "';")]
+                               [(str "SELECT id," (name column) " FROM " table " WHERE id = ?;") id]
                                {:builder-fn rs/as-unqualified-lower-maps})
                 first
                 column)]
@@ -160,7 +165,7 @@
 
 (defn read-all [db-type connection table id]
   (let [res (-> (jdbc/execute! connection
-                               [(str "SELECT id, header, meta, val FROM " table " WHERE id = '" id "';")]
+                               [(str "SELECT id, header, meta, val FROM " table " WHERE id = ?;") id]
                                {:builder-fn rs/as-unqualified-lower-maps})
                 first)]
     (into {} (for [[k v] res] [k (if (= k :id) v (extract-bytes v db-type))]))))
@@ -221,11 +226,11 @@
   (-delete-blob [_ store-key env]
     (async+sync (:sync? env) *default-sync-translation*
                 (go-try- (jdbc/execute! connection
-                                        [(str "DELETE FROM " table " WHERE id = '" store-key "';")]))))
+                                        [(str "DELETE FROM " table " WHERE id = ?;") store-key]))))
   (-blob-exists? [_ store-key env]
     (async+sync (:sync? env) *default-sync-translation*
                 (go-try- (let [res (jdbc/execute! connection
-                                                  [(str "SELECT 1 FROM " table " WHERE id = '" store-key "';")])]
+                                                  [(str "SELECT 1 FROM " table " WHERE id = ?;") store-key])]
                            (not (nil? (first res)))))))
   (-copy [_ from to env]
     (async+sync (:sync? env) *default-sync-translation*
