@@ -170,6 +170,13 @@
                 first)]
     (into {} (for [[k v] res] [k (if (= k :id) v (extract-bytes v db-type))]))))
 
+(defn read-meta [db-type connection table id]
+  (let [res (-> (jdbc/execute! connection
+                               [(str "SELECT id, header, meta FROM " table " WHERE id = ?;") id]
+                               {:builder-fn rs/as-unqualified-lower-maps})
+                first)]
+    (into {} (for [[k v] res] [k (if (= k :id) v (extract-bytes v db-type))]))))
+
 (extend-protocol PBackingLock
   Boolean
   (-release [_ env]
@@ -193,18 +200,18 @@
     (async+sync (:sync? env) *default-sync-translation*
                 (go-try-
                  (when-not @cache
-                   (reset! cache (read-all (:dbtype (:db-spec table)) (:connection table) (:table table) key)))
+                   (reset! cache (read-meta (:dbtype (:db-spec table)) (:connection table) (:table table) key)))
                  (-> @cache :header))))
   (-read-meta [_ _meta-size env]
     (async+sync (:sync? env) *default-sync-translation*
                 (go-try- (-> @cache :meta))))
   (-read-value [_ _meta-size env]
     (async+sync (:sync? env) *default-sync-translation*
-                (go-try- (-> @cache :val))))
+                (go-try- (read-field (:dbtype (:db-spec table)) (:connection table) (:table table) key :val))))
   (-read-binary [_ _meta-size locked-cb env]
     (async+sync (:sync? env) *default-sync-translation*
-                (go-try- (locked-cb {:input-stream (when (-> @cache :val) (ByteArrayInputStream. (-> @cache :val)))
-                                     :size nil}))))
+                (go-try- (read-field (:dbtype (:db-spec table)) (:connection table) (:table table) key :val
+                                     :binary? true :locked-cb locked-cb))))
   (-write-header [_ header env]
     (async+sync (:sync? env) *default-sync-translation*
                 (go-try- (swap! data assoc :header header))))
