@@ -170,6 +170,18 @@
                 first)]
     (into {} (for [[k v] res] [k (if (= k :id) v (extract-bytes v db-type))]))))
 
+(defn read-meta [db-type connection table id]
+  (let [res (-> (jdbc/execute! connection
+                               [(str "SELECT id, header, meta FROM " table " WHERE id = ?;") id]
+                               {:builder-fn rs/as-unqualified-lower-maps})
+                first)]
+    (into {} (for [[k v] res] [k (if (= k :id) v (extract-bytes v db-type))]))))
+
+(defn read-operation [env db-type connection table id]
+  (if (= :read-meta (:operation env))
+    (read-meta db-type connection table id)
+    (read-all db-type connection table id)))
+
 (extend-protocol PBackingLock
   Boolean
   (-release [_ env]
@@ -192,19 +204,28 @@
   (-read-header [_ env]
     (async+sync (:sync? env) *default-sync-translation*
                 (go-try-
-                 (when-not @cache
-                   (reset! cache (read-all (:dbtype (:db-spec table)) (:connection table) (:table table) key)))
+                 (when-not (:header @cache)
+                   (reset! cache (read-operation env (:dbtype (:db-spec table)) (:connection table) (:table table) key)))
                  (-> @cache :header))))
   (-read-meta [_ _meta-size env]
     (async+sync (:sync? env) *default-sync-translation*
-                (go-try- (-> @cache :meta))))
+                (go-try-
+                 (when-not (:meta @cache)
+                   (reset! cache (read-operation env (:dbtype (:db-spec table)) (:connection table) (:table table) key)))
+                 (-> @cache :meta))))
   (-read-value [_ _meta-size env]
     (async+sync (:sync? env) *default-sync-translation*
-                (go-try- (-> @cache :val))))
+                (go-try-
+                 (when-not (:val @cache)
+                   (reset! cache (read-operation env (:dbtype (:db-spec table)) (:connection table) (:table table) key)))
+                 (-> @cache :val))))
   (-read-binary [_ _meta-size locked-cb env]
     (async+sync (:sync? env) *default-sync-translation*
-                (go-try- (locked-cb {:input-stream (when (-> @cache :val) (ByteArrayInputStream. (-> @cache :val)))
-                                     :size nil}))))
+                (go-try-
+                 (when-not (:val @cache)
+                   (reset! cache (read-operation env (:dbtype (:db-spec table)) (:connection table) (:table table) key)))
+                 (locked-cb {:input-stream (when (-> @cache :val) (ByteArrayInputStream. (-> @cache :val)))
+                             :size nil}))))
   (-write-header [_ header env]
     (async+sync (:sync? env) *default-sync-translation*
                 (go-try- (swap! data assoc :header header))))
