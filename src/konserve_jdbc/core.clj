@@ -207,11 +207,11 @@
                 (go-try- (-> @cache :meta))))
   (-read-value [_ _meta-size env]
     (async+sync (:sync? env) *default-sync-translation*
-                (go-try- 
+                (go-try-
                  (read-field (:dbtype (:db-spec table)) (:connection table) (:table table) key :val))))
   (-read-binary [_ _meta-size locked-cb env]
     (async+sync (:sync? env) *default-sync-translation*
-                (go-try- 
+                (go-try-
                  (read-field (:dbtype (:db-spec table)) (:connection table) (:table table) key :val
                              :binary? true :locked-cb locked-cb))))
   (-write-header [_ header env]
