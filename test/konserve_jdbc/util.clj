@@ -21,7 +21,7 @@
 ;; Test configuration
 ;; This works with 100k keys but it make testing really slow 
 ;; for the sake of our sanity we leave it at 10k
-(def ^:const default-num-keys 100000)
+(def ^:const default-num-keys 10000)
 
 ;; Helper functions for multi-operation tests
 (defn generate-keys
