@@ -410,10 +410,10 @@
                            ;; MySQL: max_allowed_packet limits total query size, user may not know or be able to change so use conservative appraoch
                            ;; SQLite: default 999 parameters (SQLITE_MAX_VARIABLE_NUMBER)
                            ;; H2: no specific limit documented
-                            batch-size (case (:dbtype db-spec)
-                                        "postgresql" 10000  
-                                        ("mssql" "sqlserver") 1800 
-                                        900)  
+                           batch-size (case (:dbtype db-spec)
+                                        "postgresql" 10000
+                                        ("mssql" "sqlserver") 1800
+                                        900)
 
                            ;; Process keys in batches to handle large deletion sets
                            process-batch (fn [batch-keys]

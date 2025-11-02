@@ -21,7 +21,7 @@
 ;; Test configuration
 ;; This works with 100k keys but it make testing really slow 
 ;; for the sake of our sanity we leave it at 10k
-(def ^:const default-num-keys 100000) 
+(def ^:const default-num-keys 100000)
 
 ;; Helper functions for multi-operation tests
 (defn generate-keys
@@ -44,7 +44,7 @@
       (k/multi-assoc store key-value-map {:sync? true})
       (let [elapsed (- (System/currentTimeMillis) start)]
         (println (format "%s: Multi-assoc'd %d keys in %d ms (%.2f keys/sec)"
-                       db-name num-keys elapsed (/ (* num-keys 1000.0) elapsed)))))
+                         db-name num-keys elapsed (/ (* num-keys 1000.0) elapsed)))))
 
     ;; Verify some keys exist
     (is (k/exists? store :key-0 {:sync? true}))
@@ -62,7 +62,7 @@
       (k/multi-dissoc store test-keys {:sync? true})
       (let [elapsed (- (System/currentTimeMillis) start)]
         (println (format "%s: Multi-dissoc'd %d keys in %d ms (%.2f keys/sec)"
-                       db-name num-keys elapsed (/ (* num-keys 1000.0) elapsed)))))
+                         db-name num-keys elapsed (/ (* num-keys 1000.0) elapsed)))))
 
     ;; Verify keys are gone
     (is (not (k/exists? store :key-0 {:sync? true})))
@@ -88,7 +88,7 @@
       (<!! (k/multi-assoc store key-value-map {:sync? false}))
       (let [elapsed (- (System/currentTimeMillis) start)]
         (println (format "%s (async): Multi-assoc'd %d keys in %d ms (%.2f keys/sec)"
-                       db-name num-keys elapsed (/ (* num-keys 1000.0) elapsed)))))
+                         db-name num-keys elapsed (/ (* num-keys 1000.0) elapsed)))))
 
     ;; Verify some keys exist
     (is (<!! (k/exists? store :key-0 {:sync? false})))
@@ -106,7 +106,7 @@
       (<!! (k/multi-dissoc store test-keys {:sync? false}))
       (let [elapsed (- (System/currentTimeMillis) start)]
         (println (format "%s (async): Multi-dissoc'd %d keys in %d ms (%.2f keys/sec)"
-                       db-name num-keys elapsed (/ (* num-keys 1000.0) elapsed)))))
+                         db-name num-keys elapsed (/ (* num-keys 1000.0) elapsed)))))
 
     ;; Verify keys are gone
     (is (not (<!! (k/exists? store :key-0 {:sync? false}))))
