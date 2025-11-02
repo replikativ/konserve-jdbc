@@ -134,6 +134,61 @@
           "INSERT (id, header, meta, val) VALUES (new.id, new.header, new.meta, new.val);")
      to from]))
 
+(defn bulk-insert-statement [db-type table store-key-values]
+  "Generate bulk INSERT/UPSERT statement for multiple key-value pairs.
+   Returns a vector with [sql-string & parameters]."
+  (let [;; Generate placeholders for VALUES clause: (?, ?, ?, ?), (?, ?, ?, ?), ...
+        values-placeholder (str/join "," (repeat (count store-key-values) "(?, ?, ?, ?)"))
+        ;; Flatten all parameters: [id1 header1 meta1 val1 id2 header2 meta2 val2 ...]
+        params (mapcat (fn [[store-key {:keys [header meta value]}]]
+                         [store-key header meta value])
+                       store-key-values)]
+    (case db-type
+      "h2"
+      (into [(str "MERGE INTO " table " (id, header, meta, val) VALUES " values-placeholder ";")]
+            params)
+
+      ("postgresql" "sqlite")
+      (into [(str "INSERT INTO " table " (id, header, meta, val) VALUES " values-placeholder " "
+                  "ON CONFLICT (id) DO UPDATE "
+                  "SET header = excluded.header, meta = excluded.meta, val = excluded.val;")]
+            params)
+
+      "mysql"
+      (into [(str "INSERT INTO " table " (id, header, meta, val) VALUES " values-placeholder " "
+                  "ON DUPLICATE KEY UPDATE "
+                  "header = VALUES(header), meta = VALUES(meta), val = VALUES(val);")]
+            params)
+
+      ("mssql" "sqlserver")
+      (into [(str "MERGE dbo." table " WITH (HOLDLOCK) AS tgt "
+                  "USING (VALUES " values-placeholder ") AS new (id, header, meta, val) "
+                  "ON tgt.id = new.id "
+                  "WHEN MATCHED THEN UPDATE "
+                  "SET tgt.header = new.header, tgt.meta = new.meta, tgt.val = new.val "
+                  "WHEN NOT MATCHED THEN "
+                  "INSERT (id, header, meta, val) VALUES (new.id, new.header, new.meta, new.val);")]
+            params)
+
+      ;; Default case (generic MERGE)
+      (into [(str "MERGE " table " AS tgt "
+                  "USING (VALUES " values-placeholder ") AS new (id, header, meta, val) "
+                  "ON tgt.id = new.id "
+                  "WHEN MATCHED THEN UPDATE "
+                  "SET tgt.header = new.header, tgt.meta = new.meta, tgt.val = new.val "
+                  "WHEN NOT MATCHED THEN "
+                  "INSERT (id, header, meta, val) VALUES (new.id, new.header, new.meta, new.val);")]
+            params))))
+
+(defn bulk-delete-statement [db-type table store-keys]
+  (let [placeholders (str/join "," (repeat (count store-keys) "?"))]
+    (case db-type
+      ("mssql" "sqlserver")
+      (into [(str "DELETE FROM dbo." table " WHERE id IN (" placeholders ");")]
+            store-keys)
+      (into [(str "DELETE FROM " table " WHERE id IN (" placeholders ");")]
+            store-keys))))
+
 (defn delete-statement [db-type table]
   (case db-type
     ("mssql" "sqlserver")
@@ -305,20 +360,91 @@
   (-multi-write-blobs [this store-key-values env]
     (async+sync (:sync? env) *default-sync-translation*
                 (go-try-
-                 (jdbc/with-transaction [tx connection]
-                   (let [results (reduce (fn [results [store-key data]]
-                                           (let [{:keys [header meta value]} data
-                                                 db-type (:dbtype db-spec)
-                                                 ps (update-statement db-type table
-                                                                      store-key header meta value)
-                                                 exec-result (jdbc/execute! tx ps)
-                                                 success (if (number? (first exec-result))
-                                                           (pos? (first exec-result))
-                                                           true)] ;; successful execute! returns different values in different JDBC drivers
-                                             (assoc results store-key success)))
-                                         {}
-                                         store-key-values)]
-                     results))))))
+                 (if (empty? store-key-values)
+                   {}
+                   (jdbc/with-transaction [tx connection]
+                     (let [;; Use same batch size strategy as multi-delete
+                           ;; SQL Server supports VALUES with up to 2100 parameters (4 params per row = 525 rows)
+                           ;; But using conservative 1800 params (450 rows) to stay well under limit
+                           ;; PostgreSQL: no hard limit, use 10000 params (2500 rows) for good performance
+                           ;; SQLite: default 999 parameters, use 900 (225 rows) to stay under limit
+                           batch-size (case (:dbtype db-spec)
+                                        "postgresql" 2500  ;; 10000 params / 4 = 2500 rows
+                                        ("mssql" "sqlserver") 450  ;; 1800 params / 4 = 450 rows
+                                        225)  ;; 900 params / 4 = 225 rows (SQLite and default)
+
+                           ;; Process key-value pairs in batches
+                           process-batch (fn [batch-kvs]
+                                           (when (seq batch-kvs)
+                                             (let [;; Generate bulk insert statement
+                                                   bulk-stmt (bulk-insert-statement (:dbtype db-spec) table batch-kvs)
+                                                   ;; Execute bulk insert
+                                                   exec-result (jdbc/execute! tx bulk-stmt)
+                                                   ;; Determine success - different JDBC drivers return different values
+                                                   success (if (number? (first exec-result))
+                                                             (pos? (first exec-result))
+                                                             true)]
+                                               ;; Return results showing success for all keys in this batch
+                                               (reduce (fn [acc [store-key _]]
+                                                         (assoc acc store-key success))
+                                                       {}
+                                                       batch-kvs))))
+
+                           ;; Process all key-value pairs in batches and merge results
+                           all-results (reduce (fn [acc batch]
+                                                 (merge acc (process-batch batch)))
+                                               {}
+                                               (partition-all batch-size store-key-values))]
+                       all-results))))))
+
+  ;; Implementation for atomic multi-key deletes
+  (-multi-delete-blobs [this store-keys env]
+    (async+sync (:sync? env) *default-sync-translation*
+                (go-try-
+                 (if (empty? store-keys)
+                   {}
+                   (jdbc/with-transaction [tx connection]
+                     (let [;; SQL Server supports IN clause with up to 2100 parameters
+                           ;; PostgreSQL, MySQL, H2, SQLite all support IN clause efficiently
+                           ;; PostgreSQL: no hard limit, but practical limit around 10k-100k
+                           ;; MySQL: max_allowed_packet limits total query size, user may not know or be able to change so use conservative appraoch
+                           ;; SQLite: default 999 parameters (SQLITE_MAX_VARIABLE_NUMBER)
+                           ;; H2: no specific limit documented
+                           batch-size (case (:dbtype db-spec)
+                                        "postgresql" 10000
+                                        ("mssql" "sqlserver") 1800
+                                        900)
+
+                           ;; Process keys in batches to handle large deletion sets
+                           process-batch (fn [batch-keys]
+                                           (when (seq batch-keys)
+                                             (let [;; First, check which keys exist
+                                                   placeholders (str/join "," (repeat (count batch-keys) "?"))
+                                                   select-sql (case (:dbtype db-spec)
+                                                                ("mssql" "sqlserver")
+                                                                (str "SELECT id FROM dbo." table " WHERE id IN (" placeholders ");")
+                                                                (str "SELECT id FROM " table " WHERE id IN (" placeholders ");"))
+                                                   existing-keys (->> (jdbc/execute! tx (into [select-sql] batch-keys)
+                                                                                     {:builder-fn rs/as-unqualified-lower-maps})
+                                                                      (map :id)
+                                                                      (into #{}))
+
+                                                   ;; Now perform bulk delete if there are keys to delete
+                                                   _ (when (seq existing-keys)
+                                                       (jdbc/execute! tx (bulk-delete-statement (:dbtype db-spec) table (vec existing-keys))))]
+
+                                               ;; Return results showing which keys existed
+                                               (reduce (fn [acc k]
+                                                         (assoc acc k (contains? existing-keys k)))
+                                                       {}
+                                                       batch-keys))))
+
+                           ;; Process all keys in batches and merge results
+                           all-results (reduce (fn [acc batch]
+                                                 (merge acc (process-batch batch)))
+                                               {}
+                                               (partition-all batch-size store-keys))]
+                       all-results)))))))
 
 (defn- prepare-spec [db]
   ;; next.jdbc does not officially support the credentials in the format: driver://user:password@host/db
@@ -453,6 +579,14 @@
   (k/get-in store [:bar] nil {:sync? true})
   (k/dissoc store :bar {:sync? true})
 
+  ;; Test multi-dissoc
+  (k/assoc-in store [:user1] {:name "Alice"} {:sync? true})
+  (k/assoc-in store [:user2] {:name "Bob"} {:sync? true})
+  (k/assoc-in store [:user3] {:name "Charlie"} {:sync? true})
+  (k/keys store {:sync? true})
+  (k/multi-dissoc store [:user1 :user2 :user3] {:sync? true})
+  (k/keys store {:sync? true})
+
   (k/append store :error-log {:type :horrible} {:sync? true})
   (k/log store :error-log {:sync? true})
 
@@ -482,6 +616,14 @@
   (<!! (k/update-in store [:bar] inc {:sync? false}))
   (<!! (k/get-in store [:bar] nil {:sync? false}))
   (<!! (k/dissoc store :bar {:sync? false}))
+
+  ;; Test multi-dissoc (async)
+  (<!! (k/assoc-in store [:user1] {:name "Alice"} {:sync? false}))
+  (<!! (k/assoc-in store [:user2] {:name "Bob"} {:sync? false}))
+  (<!! (k/assoc-in store [:user3] {:name "Charlie"} {:sync? false}))
+  (<!! (k/keys store {:sync? false}))
+  (<!! (k/multi-dissoc store [:user1 :user2 :user3] {:sync? false}))
+  (<!! (k/keys store {:sync? false}))
 
   (<!! (k/append store :error-log {:type :horrible} {:sync? false}))
   (<!! (k/log store :error-log {:sync? false}))
