@@ -2,7 +2,8 @@
   "Address globally aggregated immutable key-value stores(s)."
   (:require [konserve.impl.defaults :refer [connect-default-store]]
             [konserve.impl.storage-layout :refer [PBackingStore PBackingBlob PBackingLock
-                                                  PMultiWriteBackingStore -delete-store]]
+                                                  PMultiWriteBackingStore PMultiReadBackingStore
+                                                  -delete-store]]
             [konserve.compressor :refer [null-compressor]]
             [konserve.encryptor :refer [null-encryptor]]
             [konserve.utils :refer [async+sync *default-sync-translation*]]
@@ -187,6 +188,28 @@
       (into [(str "DELETE FROM dbo." table " WHERE id IN (" placeholders ");")]
             store-keys)
       (into [(str "DELETE FROM " table " WHERE id IN (" placeholders ");")]
+            store-keys))))
+
+(def read-batch-limits
+  "Maximum keys per SELECT IN clause, by database type.
+   Based on SQL parameter limits (1 param per key) and practical result set sizes."
+  {"postgresql" 5000   ; 10k param limit, but cap at 5k for result set size
+   "mssql"      1500   ; 1.8k param limit, leave headroom
+   "sqlserver"  1500
+   "sqlite"     500    ; 999 param limit in SQLite
+   "mysql"      1000   ; 65k limit but cap for practical reasons
+   "h2"         2000}) ; Conservative default
+
+(defn bulk-select-statement
+  "Generate SELECT statement for multiple keys.
+   Returns a vector with [sql-string & parameters]."
+  [db-type table store-keys]
+  (let [placeholders (str/join "," (repeat (count store-keys) "?"))]
+    (case db-type
+      ("mssql" "sqlserver")
+      (into [(str "SELECT id, header, meta, val FROM dbo." table " WHERE id IN (" placeholders ");")]
+            store-keys)
+      (into [(str "SELECT id, header, meta, val FROM " table " WHERE id IN (" placeholders ");")]
             store-keys))))
 
 (defn delete-statement [db-type table]
@@ -438,6 +461,44 @@
                                                          (assoc acc k (contains? existing-keys k)))
                                                        {}
                                                        batch-keys))))
+
+                           ;; Process all keys in batches and merge results
+                           all-results (reduce (fn [acc batch]
+                                                 (merge acc (process-batch batch)))
+                                               {}
+                                               (partition-all batch-size store-keys))]
+                       all-results))))))
+
+  ;; Implementation for atomic multi-key reads
+  PMultiReadBackingStore
+  (-multi-read-blobs [this store-keys env]
+    (async+sync (:sync? env) *default-sync-translation*
+                (go-try-
+                 (if (empty? store-keys)
+                   {}
+                   (jdbc/with-transaction [tx connection]
+                     (let [db-type (:dbtype db-spec)
+                           ;; Get batch size for this database type
+                           batch-size (get read-batch-limits db-type 1000)
+
+                           ;; Process a batch of keys and return map of {store-key -> JDBCRow}
+                           process-batch (fn [batch-keys]
+                                           (when (seq batch-keys)
+                                             (let [select-stmt (bulk-select-statement db-type table batch-keys)
+                                                   rows (jdbc/execute! tx select-stmt
+                                                                       {:builder-fn rs/as-unqualified-lower-maps})]
+                                               ;; Build map of store-key -> JDBCRow with pre-populated cache
+                                               (reduce (fn [acc row]
+                                                         (let [store-key (:id row)
+                                                               ;; Pre-populate cache with fetched data (eager loading)
+                                                               cache-data {:id store-key
+                                                                           :header (extract-bytes (:header row) db-type)
+                                                                           :meta (extract-bytes (:meta row) db-type)
+                                                                           :val (extract-bytes (:val row) db-type)}
+                                                               jdbc-row (JDBCRow. this store-key (atom {}) (atom cache-data))]
+                                                           (assoc acc store-key jdbc-row)))
+                                                       {}
+                                                       rows))))
 
                            ;; Process all keys in batches and merge results
                            all-results (reduce (fn [acc batch]
