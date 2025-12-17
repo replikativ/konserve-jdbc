@@ -32,8 +32,8 @@
    (generate-keys default-num-keys)))
 
 (defn test-multi-operations-sync
-  "Test multi-assoc and multi-dissoc synchronously.
-   First inserts N keys using multi-assoc, then deletes them using multi-dissoc."
+  "Test multi-assoc, multi-get, and multi-dissoc synchronously.
+   Inserts N keys using multi-assoc, retrieves them with multi-get, then deletes with multi-dissoc."
   [store db-name num-keys]
   (let [test-keys (generate-keys num-keys)
         ;; Build map for multi-assoc: {:key-0 {:id :key-0 :value "value-key-0"} ...}
@@ -57,6 +57,32 @@
     (let [all-keys (k/keys store {:sync? true})]
       (is (= num-keys (count all-keys))))
 
+    ;; Multi-get all keys
+    (let [start (System/currentTimeMillis)
+          result (k/multi-get store test-keys {:sync? true})
+          elapsed (- (System/currentTimeMillis) start)]
+      (println (format "%s: Multi-get'd %d keys in %d ms (%.2f keys/sec)"
+                       db-name num-keys elapsed (/ (* num-keys 1000.0) elapsed)))
+      ;; Verify we got all keys back
+      (is (= num-keys (count result)))
+      ;; Verify values match what we inserted
+      (is (= {:id :key-0 :value "value-key-0"} (get result :key-0)))
+      (is (= {:id (last test-keys) :value (str "value-" (name (last test-keys)))} (get result (last test-keys)))))
+
+    ;; Multi-get with some missing keys (sparse map behavior)
+    (let [mixed-keys [:key-0 :nonexistent-key-1 :key-1 :nonexistent-key-2]
+          result (k/multi-get store mixed-keys {:sync? true})]
+      ;; Should only contain existing keys
+      (is (= 2 (count result)))
+      (is (contains? result :key-0))
+      (is (contains? result :key-1))
+      (is (not (contains? result :nonexistent-key-1)))
+      (is (not (contains? result :nonexistent-key-2))))
+
+    ;; Multi-get with all missing keys
+    (let [result (k/multi-get store [:missing-1 :missing-2 :missing-3] {:sync? true})]
+      (is (= {} result)))
+
     ;; Multi-dissoc all keys using multi-dissoc
     (let [start (System/currentTimeMillis)]
       (k/multi-dissoc store test-keys {:sync? true})
@@ -76,8 +102,8 @@
       (is (zero? (count all-keys))))))
 
 (defn test-multi-operations-async
-  "Test multi-assoc and multi-dissoc asynchronously.
-   First inserts N keys using multi-assoc, then deletes them using multi-dissoc."
+  "Test multi-assoc, multi-get, and multi-dissoc asynchronously.
+   Inserts N keys using multi-assoc, retrieves them with multi-get, then deletes with multi-dissoc."
   [store db-name num-keys]
   (let [test-keys (generate-keys num-keys)
         ;; Build map for multi-assoc: {:key-0 {:id :key-0 :value "value-key-0"} ...}
@@ -100,6 +126,32 @@
     ;; Count keys after assoc
     (let [all-keys (<!! (k/keys store {:sync? false}))]
       (is (= num-keys (count all-keys))))
+
+    ;; Multi-get all keys
+    (let [start (System/currentTimeMillis)
+          result (<!! (k/multi-get store test-keys {:sync? false}))
+          elapsed (- (System/currentTimeMillis) start)]
+      (println (format "%s (async): Multi-get'd %d keys in %d ms (%.2f keys/sec)"
+                       db-name num-keys elapsed (/ (* num-keys 1000.0) elapsed)))
+      ;; Verify we got all keys back
+      (is (= num-keys (count result)))
+      ;; Verify values match what we inserted
+      (is (= {:id :key-0 :value "value-key-0"} (get result :key-0)))
+      (is (= {:id (last test-keys) :value (str "value-" (name (last test-keys)))} (get result (last test-keys)))))
+
+    ;; Multi-get with some missing keys (sparse map behavior)
+    (let [mixed-keys [:key-0 :nonexistent-key-1 :key-1 :nonexistent-key-2]
+          result (<!! (k/multi-get store mixed-keys {:sync? false}))]
+      ;; Should only contain existing keys
+      (is (= 2 (count result)))
+      (is (contains? result :key-0))
+      (is (contains? result :key-1))
+      (is (not (contains? result :nonexistent-key-1)))
+      (is (not (contains? result :nonexistent-key-2))))
+
+    ;; Multi-get with all missing keys
+    (let [result (<!! (k/multi-get store [:missing-1 :missing-2 :missing-3] {:sync? false}))]
+      (is (= {} result)))
 
     ;; Multi-dissoc all keys using multi-dissoc
     (let [start (System/currentTimeMillis)]
