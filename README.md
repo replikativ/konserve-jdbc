@@ -124,20 +124,66 @@ by the one specified in the `db-spec`. If no table is specified `konserve` is us
 
 ## Multi-key Operations
 
-This backend supports atomic multi-key operations through the `multi-assoc` function, which allows you to update multiple keys in a single atomic transaction. This ensures that either all operations succeed or all fail (ACID guarantees).
+This backend supports atomic multi-key operations (`multi-assoc`, `multi-get`, `multi-dissoc`), allowing you to read, write, or delete multiple keys in a single operation. All operations use JDBC transactions for atomicity.
 
 ``` clojure
-;; Update multiple keys atomically in a single transaction
-(k/multi-assoc store {:user1 {:name "Alice"} 
-                      :user2 {:name "Bob"}} 
+;; Write multiple keys atomically
+(k/multi-assoc store {:user1 {:name "Alice"}
+                      :user2 {:name "Bob"}}
                {:sync? true})
 
-;; Or asynchronously
-(<! (k/multi-assoc store {:user1 {:name "Alice"} 
-                          :user2 {:name "Bob"}}))
+;; Read multiple keys in one request
+(k/multi-get store [:user1 :user2 :user3] {:sync? true})
+;; => {:user1 {:name "Alice"}, :user2 {:name "Bob"}}
+;; Note: Returns sparse map - only found keys are included
+
+;; Delete multiple keys atomically
+(k/multi-dissoc store [:user1 :user2] {:sync? true})
+;; => {:user1 true, :user2 true}
+;; Returns map indicating which keys existed before deletion
+
+;; Async versions
+(<! (k/multi-assoc store {:user1 {:name "Alice"}}))
+(<! (k/multi-get store [:user1 :user2]))
+(<! (k/multi-dissoc store [:user1 :user2]))
 ```
 
-The implementation uses JDBC transactions to ensure atomicity, making it suitable for use cases that require strong consistency guarantees across multiple keys.
+### Batch Limits
+
+Operations exceeding batch limits are **automatically batched** within a single transaction - this is transparent to the caller.
+
+**Write batch limits** (rows per batch, based on SQL parameter limits):
+
+| Database | Rows per batch |
+|----------|----------------|
+| PostgreSQL | 2500 |
+| SQL Server/MSSQL | 450 |
+| SQLite/MySQL/H2 | 225 |
+
+**Read batch limits** (keys per SELECT IN clause):
+
+| Database | Keys per batch |
+|----------|----------------|
+| PostgreSQL | 5000 |
+| H2 | 2000 |
+| SQL Server/MSSQL | 1500 |
+| MySQL | 1000 |
+| SQLite | 500 |
+
+**Delete batch limits** (keys per DELETE IN clause):
+
+| Database | Keys per batch |
+|----------|----------------|
+| PostgreSQL | 10000 |
+| SQL Server/MSSQL | 1800 |
+| SQLite/MySQL/H2 | 900 |
+
+### Implementation Details
+
+- All operations are wrapped in JDBC transactions for atomicity (all-or-nothing)
+- Uses bulk INSERT/UPSERT statements for efficient writes
+- Connection pooling via c3p0 is used by default for concurrent access
+- Database-specific SQL syntax is handled automatically (MERGE, ON CONFLICT, REPLACE, etc.)
 
 ## Supported Databases
 
