@@ -7,6 +7,7 @@
             [konserve.compressor :refer [null-compressor]]
             [konserve.encryptor :refer [null-encryptor]]
             [konserve.utils :refer [async+sync *default-sync-translation*]]
+            [konserve.store :as store]
             [superv.async :refer [go-try- <?-]]
             [clojure.core.async :refer [go <!! chan close! put!]]
             [next.jdbc :as jdbc]
