@@ -8,114 +8,95 @@ Add to your dependencies:
 
 [![Clojars Project](http://clojars.org/io.replikativ/konserve-jdbc/latest-version.svg)](http://clojars.org/io.replikativ/konserve-jdbc)
 
-### Synchronous Execution
+### Configuration
+
+Supports all [JDBC-compatible databases](https://clojure.org/guides/deps_and_cli).
 
 ``` clojure
-(require '[konserve-jdbc.core :refer [connect-jdbc-store]]
+(require '[konserve-jdbc.core]  ;; Registers the :jdbc backend
          '[konserve.core :as k])
 
-(def db-spec
-  {:dbtype "sqlite"
-   :dbname "./tmp/sql/konserve"})
-   
-(def store (connect-jdbc-store db-spec :opts {:sync? true}))
+;; SQLite
+(def sqlite-config
+  {:backend :jdbc
+   :dbtype "sqlite"
+   :dbname "./tmp/konserve.db"
+   :table "store"
+   :id #uuid "550e8400-e29b-41d4-a716-446655440000"})
 
-(k/assoc-in store ["foo" :bar] {:foo "baz"} {:sync? true})
-(k/get-in store ["foo"] nil {:sync? true})
-(k/exists? store "foo" {:sync? true})
+;; PostgreSQL
+(def postgres-config
+  {:backend :jdbc
+   :dbtype "postgresql"
+   :dbname "mydb"
+   :host "localhost"
+   :user "postgres"
+   :password "password"
+   :table "konserve"
+   :id #uuid "550e8400-e29b-41d4-a716-446655440001"})
 
-(k/assoc-in store [:bar] 42 {:sync? true})
-(k/update-in store [:bar] inc {:sync? true})
-(k/get-in store [:bar] nil {:sync? true})
-(k/dissoc store :bar {:sync? true})
+;; MySQL
+(def mysql-config
+  {:backend :jdbc
+   :dbtype "mysql"
+   :dbname "mydb"
+   :host "localhost"
+   :user "root"
+   :password "password"
+   :table "konserve"
+   :id #uuid "550e8400-e29b-41d4-a716-446655440002"})
 
-;; Multi-key atomic operations
-(k/multi-assoc store {:user1 {:name "Alice"} 
-                       :user2 {:name "Bob"}} 
-                {:sync? true})
-
-(k/append store :error-log {:type :horrible} {:sync? true})
-(k/log store :error-log {:sync? true})
-
-(let [ba (byte-array (* 10 1024 1024) (byte 42))]
-  (time (k/bassoc store "banana" ba {:sync? true})))
-
-(k/bassoc store :binbar (byte-array (range 10)) {:sync? true})
-(k/bget store :binbar (fn [{:keys [input-stream]}]
-                               (map byte (slurp input-stream)))
-       {:sync? true})
-               
+(def store (k/create-store sqlite-config {:sync? true}))
 ```
 
-### Asynchronous Execution
+For API usage (assoc-in, get-in, delete-store, etc.), see the [konserve documentation](https://github.com/replikativ/konserve).
 
-``` clojure
-(ns test-db
-  (require '[konserve-jdbc.core :refer [connect-jdbc-store]]
-           '[clojure.core.async :refer [<!]]
-           '[konserve.core :as k])
-
-(def db-spec
-  {:dbtype "sqlite"
-   :dbname "./tmp/sql/konserve"})
-   
-(def store (<! (connect-jdbc-store db-spec :opts {:sync? false})))
-
-(<! (k/assoc-in store ["foo" :bar] {:foo "baz"}))
-(<! (k/get-in store ["foo"]))
-(<! (k/exists? store "foo"))
-
-(<! (k/assoc-in store [:bar] 42))
-(<! (k/update-in store [:bar] inc))
-(<! (k/get-in store [:bar]))
-(<! (k/dissoc store :bar))
-
-;; Multi-key atomic operations
-(<! (k/multi-assoc store {:user1 {:name "Alice"} 
-                           :user2 {:name "Bob"}}))
-
-(<! (k/append store :error-log {:type :horrible}))
-(<! (k/log store :error-log))
-
-(<! (k/bassoc store :binbar (byte-array (range 10)) {:sync? false}))
-(<! (k/bget store :binbar (fn [{:keys [input-stream]}]
-                            (map byte (slurp input-stream)))
-            {:sync? false}))
-```
 ## Multitenancy
-To enable the use of the same JDBC database for multiple stores all jdbc specs accept a table name.
-The table can specified separately or passed in the `db-spec`. 
+
+Multiple independent stores can be housed in the same database. Each store has:
+- `:id` - The virtual/global identifier for the store (required, UUID)
+- `:table` - The physical database table where data is stored (optional, defaults to "konserve")
 
 ``` clojure
-(def pg-cfg  {:dbtype  "postgresql"
-              :jdbcUrl "postgresql://user:password@localhost/konserve"})
+(def db  {:dbtype  "postgresql"
+          :dbname  "konserve"
+          :host "localhost"
+          :user "user"
+          :password "password"})
 
-(def store-a (connect-jdbc-store pg-cfg :table "this_application" :opts {:sync? true}))
-(def store-b (connect-jdbc-store pg-cfg :table "that_application" :opts {:sync? true}))
+;; Store A - uses table "app_a"
+(def store-a-config
+  (assoc db
+    :backend :jdbc
+    :table "app_a"
+    :id #uuid "11111111-1111-1111-1111-111111111111"))
 
-(def pg-cfg-a  {:dbtype  "postgresql"
-                :jdbcUrl "postgresql://user:password@localhost/konserve"
-                :table   "this_application"})
+;; Store B - uses table "app_b"
+(def store-b-config
+  (assoc db
+    :backend :jdbc
+    :table "app_b"
+    :id #uuid "22222222-2222-2222-2222-222222222222"))
 
-
-(def pg-cfg-b  {:dbtype  "postgresql"
-                :jdbcUrl "postgresql://user:password@localhost/konserve"
-                :table   "that_application"})
-
-
-(def also-store-a (connect-jdbc-store pg-cfg-a :opts {:sync? true}))
-(def also-store-b (connect-jdbc-store pg-cfg-b :opts {:sync? true}))
+;; Store C - uses default "konserve" table with different ID
+(def store-c-config
+  (assoc db
+    :backend :jdbc
+    :id #uuid "33333333-3333-3333-3333-333333333333"))
 ```
+
 In terms of priority a table specified using the keyword argument takes priority, followed
 by the one specified in the `db-spec`. If no table is specified `konserve` is used as the table name.
 
 ``` clojure
 (def cfg-a  {:dbtype  "postgresql"
-             :jdbcUrl "postgresql://user:password@localhost/konserve"})
+             :jdbcUrl "postgresql://user:password@localhost/konserve"
+             :id #uuid "11111111-1111-1111-1111-111111111111"})
 
 (def cfg-b  {:dbtype  "postgresql"
              :jdbcUrl "postgresql://user:password@localhost/konserve"
-             :table   "water"})
+             :table   "water"
+             :id #uuid "22222222-2222-2222-2222-222222222222"})
 
 (def store-a (connect-jdbc-store cfg-a :opts {:sync? true})) ;; table name => konserve
 (def store-b (connect-jdbc-store cfg-b :opts {:sync? true}))  ;; table name => water 
@@ -184,6 +165,49 @@ Operations exceeding batch limits are **automatically batched** within a single 
 - Uses bulk INSERT/UPSERT statements for efficient writes
 - Connection pooling via c3p0 is used by default for concurrent access
 - Database-specific SQL syntax is handled automatically (MERGE, ON CONFLICT, REPLACE, etc.)
+
+(def store-a (k/create-store store-a-config {:sync? true}))
+(def store-b (k/create-store store-b-config {:sync? true}))
+(def store-c (k/create-store store-c-config {:sync? true}))
+```
+
+The `:id` is the authoritative virtual store identity used for global identification. The `:table` determines the physical storage location. Multiple stores can share the same table but must have different `:id` values.
+
+## Implementation Details
+
+### Multi-key Operations
+
+This backend supports atomic multi-key operations (`multi-assoc`, `multi-get`, `multi-dissoc`). All operations use JDBC transactions for atomicity.
+
+**Automatic Batching**: Operations exceeding database-specific limits are automatically batched within a single transaction - this is transparent to the caller.
+
+**Write batch limits** (rows per batch, based on SQL parameter limits):
+
+| Database | Rows per batch |
+|----------|----------------|
+| PostgreSQL | 2500 |
+| SQL Server/MSSQL | 450 |
+| SQLite/MySQL/H2 | 225 |
+
+**Read batch limits** (keys per SELECT IN clause):
+
+| Database | Keys per batch |
+|----------|----------------|
+| PostgreSQL | 5000 |
+| H2 | 2000 |
+| SQL Server/MSSQL | 1500 |
+| MySQL | 1000 |
+| SQLite | 500 |
+
+**Delete batch limits** (keys per DELETE IN clause):
+
+| Database | Keys per batch |
+|----------|----------------|
+| PostgreSQL | 10000 |
+| SQL Server/MSSQL | 1800 |
+| SQLite/MySQL/H2 | 900 |
+
+**Transaction Support**: All operations are wrapped in JDBC transactions for atomicity. Uses bulk INSERT/UPSERT statements for efficient writes. Connection pooling via c3p0 is used by default for concurrent access. Database-specific SQL syntax is handled automatically.
 
 ## Supported Databases
 
@@ -260,14 +284,8 @@ Fully supported so far are the following databases:
          :password ""})
 ```
 
-## Commercial support
-
-We are happy to provide commercial support with
-[lambdaforge](https://lambdaforge.io). If you are interested in a particular
-feature, please let us know.
-
 ## License
 
-Copyright © 2021-2022 Judith Massa, Alexander Oloo
+Copyright © 2021-2026 Alexander Oloo, Christian Weilbach, Judith Massa
 
 Licensed under Eclipse Public License (see [LICENSE](LICENSE)).

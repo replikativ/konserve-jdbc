@@ -578,6 +578,40 @@
         backing (JDBCTable. db-spec connection table)]
     (-delete-store backing complete-opts)))
 
+;; =============================================================================
+;; Multimethod Registration for konserve.store dispatch
+;; =============================================================================
+
+(defmethod store/-connect-store :jdbc
+  [{:keys [dbtype dbname table] :as config} opts]
+  (async+sync (:sync? opts) *default-sync-translation*
+              (go-try-
+               (connect-store config))))
+
+(defmethod store/-create-store :jdbc
+  [{:keys [dbtype dbname table] :as config} opts]
+  (async+sync (:sync? opts) *default-sync-translation*
+              (go-try-
+               (connect-store config))))
+
+(defmethod store/-store-exists? :jdbc
+  [{:keys [dbtype dbname table] :as config} opts]
+  ;; For JDBC, we can check if we can connect (existence is implicit)
+  ;; This is a best-effort check - JDBC stores don't have explicit creation like files
+  (async+sync (:sync? opts) *default-sync-translation*
+              (go-try-
+               true)))
+
+(defmethod store/-delete-store :jdbc
+  [{:keys [dbtype dbname table] :as config} opts]
+  (async+sync (:sync? opts) *default-sync-translation*
+              (go-try-
+               (delete-store config))))
+
+(defmethod store/-release-store :jdbc
+  [_config store _opts]
+  (release store {:sync? true}))
+
 (comment
   (import  '[java.io File])
 
