@@ -610,8 +610,9 @@
                (delete-store config))))
 
 (defmethod store/-release-store :jdbc
-  [_config store _opts]
-  (release store {:sync? true}))
+  [_config store opts]
+  ;; Release respecting caller's sync mode
+  (release store opts))
 
 (comment
   (import  '[java.io File])
