@@ -1,8 +1,8 @@
 {:paths ["src"]
  :deps {com.taoensso/timbre {:mvn/version "6.1.0"}
         com.fzakaria/slf4j-timbre {:mvn/version "0.3.21"}
-        io.replikativ/konserve {:mvn/version "0.9.338"}
-        io.replikativ/superv.async {:mvn/version "0.3.46"}
+        org.replikativ/konserve {:mvn/version "0.9.342"}
+        org.replikativ/superv.async {:mvn/version "0.3.50"}
         org.clojure/clojure {:mvn/version "1.11.1"}
         com.github.seancorfield/next.jdbc {:mvn/version "1.3.874"}
         com.mchange/c3p0 {:mvn/version"0.9.5.5"}}

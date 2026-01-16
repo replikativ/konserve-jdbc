@@ -6,7 +6,7 @@ A [JDBC](https://github.com/clojure/java.jdbc) backend for [konserve](https://gi
 
 Add to your dependencies:
 
-[![Clojars Project](http://clojars.org/io.replikativ/konserve-jdbc/latest-version.svg)](http://clojars.org/io.replikativ/konserve-jdbc)
+[![Clojars Project](http://clojars.org/org.replikativ/konserve-jdbc/latest-version.svg)](http://clojars.org/org.replikativ/konserve-jdbc)
 
 ### Configuration
 
