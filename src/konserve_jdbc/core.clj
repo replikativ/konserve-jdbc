@@ -7,6 +7,7 @@
             [konserve.compressor :refer [null-compressor]]
             [konserve.encryptor :refer [null-encryptor]]
             [konserve.utils :refer [async+sync *default-sync-translation*]]
+            [konserve.store :as store]
             [superv.async :refer [go-try- <?-]]
             [clojure.core.async :refer [go <!! chan close! put!]]
             [next.jdbc :as jdbc]
@@ -225,6 +226,12 @@
     ("mssql" "sqlserver")
     [(str "SELECT TOP (?) id FROM " table " WHERE id > ? ORDER BY id;") 25000 offset]
     [(str "SELECT id FROM " table " WHERE id > ? ORDER BY id LIMIT ?;") offset 25000]))
+
+(defn table-exists-query [db-type table]
+  (case db-type
+    ("mssql" "sqlserver")
+    [(str "SELECT TOP 1 1 FROM dbo." table ";")]
+    [(str "SELECT 1 FROM " table " LIMIT 1;")]))
 
 (defn change-row-id [connection table from to]
   (jdbc/execute! connection
@@ -577,6 +584,49 @@
         connection (jdbc/get-connection (prepare-spec db-spec))
         backing (JDBCTable. db-spec connection table)]
     (-delete-store backing complete-opts)))
+
+;; =============================================================================
+;; Multimethod Registration for konserve.store dispatch
+;; =============================================================================
+
+(defmethod store/-connect-store :jdbc
+  [{:keys [dbtype dbname table] :as config} opts]
+  (async+sync (:sync? opts) *default-sync-translation*
+              (go-try-
+               (connect-store config))))
+
+(defmethod store/-create-store :jdbc
+  [{:keys [dbtype dbname table] :as config} opts]
+  (async+sync (:sync? opts) *default-sync-translation*
+              (go-try-
+               (connect-store config))))
+
+(defmethod store/-store-exists? :jdbc
+  [{:keys [dbtype table] :as config} opts]
+  ;; Check if the table exists by attempting to query it
+  (async+sync (:sync? opts) *default-sync-translation*
+              (go-try-
+               (let [table (or table default-table)
+                     db-spec (prepare-spec config)
+                     connection (jdbc/get-connection db-spec)]
+                 (try
+                   (let [result (jdbc/execute! connection (table-exists-query dbtype table))]
+                     (some? result))
+                   (catch Exception _e
+                     false)
+                   (finally
+                     (.close ^java.sql.Connection connection)))))))
+
+(defmethod store/-delete-store :jdbc
+  [{:keys [dbtype dbname table] :as config} opts]
+  (async+sync (:sync? opts) *default-sync-translation*
+              (go-try-
+               (delete-store config))))
+
+(defmethod store/-release-store :jdbc
+  [_config store opts]
+  ;; Release respecting caller's sync mode
+  (release store opts))
 
 (comment
   (import  '[java.io File])
