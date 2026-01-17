@@ -227,6 +227,12 @@
     [(str "SELECT TOP (?) id FROM " table " WHERE id > ? ORDER BY id;") 25000 offset]
     [(str "SELECT id FROM " table " WHERE id > ? ORDER BY id LIMIT ?;") offset 25000]))
 
+(defn table-exists-query [db-type table]
+  (case db-type
+    ("mssql" "sqlserver")
+    [(str "SELECT TOP 1 1 FROM dbo." table ";")]
+    [(str "SELECT 1 FROM " table " LIMIT 1;")]))
+
 (defn change-row-id [connection table from to]
   (jdbc/execute! connection
                  [(str "UPDATE " table " SET id = ? WHERE id = ?;") to from]))
@@ -604,12 +610,7 @@
                      db-spec (prepare-spec config)
                      connection (jdbc/get-connection db-spec)]
                  (try
-                   (let [query (case dbtype
-                                 ("mssql" "sqlserver")
-                                 (str "SELECT TOP 1 1 FROM dbo." table)
-                                 ;; PostgreSQL, MySQL, SQLite, H2
-                                 (str "SELECT 1 FROM " table " LIMIT 1"))
-                         result (jdbc/execute! connection [query])]
+                   (let [result (jdbc/execute! connection (table-exists-query dbtype table))]
                      (some? result))
                    (catch Exception _e
                      false)
