@@ -596,12 +596,25 @@
                (connect-store config))))
 
 (defmethod store/-store-exists? :jdbc
-  [{:keys [dbtype dbname table] :as config} opts]
-  ;; For JDBC, we can check if we can connect (existence is implicit)
-  ;; This is a best-effort check - JDBC stores don't have explicit creation like files
+  [{:keys [dbtype table] :as config} opts]
+  ;; Check if the table exists by attempting to query it
   (async+sync (:sync? opts) *default-sync-translation*
               (go-try-
-               true)))
+               (let [table (or table default-table)
+                     db-spec (prepare-spec config)
+                     connection (jdbc/get-connection db-spec)]
+                 (try
+                   (let [query (case dbtype
+                                 ("mssql" "sqlserver")
+                                 (str "SELECT TOP 1 1 FROM dbo." table)
+                                 ;; PostgreSQL, MySQL, SQLite, H2
+                                 (str "SELECT 1 FROM " table " LIMIT 1"))
+                         result (jdbc/execute! connection [query])]
+                     (some? result))
+                   (catch Exception _e
+                     false)
+                   (finally
+                     (.close ^java.sql.Connection connection)))))))
 
 (defmethod store/-delete-store :jdbc
   [{:keys [dbtype dbname table] :as config} opts]
