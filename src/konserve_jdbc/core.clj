@@ -13,7 +13,7 @@
             [next.jdbc :as jdbc]
             [next.jdbc.result-set :as rs]
             [next.jdbc.connection :as connection]
-            [taoensso.timbre :refer [warn debug] :as timbre]
+            [replikativ.logging :as log]
             [hasch.core :as hasch]
             [clojure.string :as str])
   (:import [java.sql Blob]
@@ -359,7 +359,7 @@
                  (let [res (try
                              (jdbc/execute! connection [(str "select 1 from " table " limit 1")])
                              (catch Exception _e
-                               (debug (str "Table " table " does not exist. Attempting to create it."))
+                               (log/debug :konserve.jdbc/table-not-found {:table table})
                                nil))]
                    (when (nil? res)
                      (jdbc/execute! connection (create-statement (:dbtype db-spec) table)))))))
@@ -542,12 +542,11 @@
       (throw (ex-info ":dbtype must be explicitly declared" {:options dbtypes})))
 
     (when-not (supported-dbtypes (:dbtype db-spec))
-      (warn "Unsupported database type " (:dbtype db-spec)
-            " - full functionality of store is only guaranteed for following database types: "  supported-dbtypes))
+      (log/warn :konserve.jdbc/unsupported-dbtype {:dbtype (:dbtype db-spec) :supported supported-dbtypes}))
 
     (System/setProperties
      (doto (java.util.Properties. (System/getProperties))
-       (.put "com.mchange.v2.log.MLog" "com.mchange.v2.log.slf4j.Slf4jMLog"))) ;; using  Slf4j allows timbre to control logs.
+       (.put "com.mchange.v2.log.MLog" "com.mchange.v2.log.slf4j.Slf4jMLog")))
 
     (let [complete-opts (merge {:sync? true} opts)
           db-spec (if (:dbtype db-spec)
