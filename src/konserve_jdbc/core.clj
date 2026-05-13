@@ -24,8 +24,8 @@
 (set! *warn-on-reflection* 1)
 
 (def ^:const default-table "konserve")
-(def ^:const dbtypes ["h2" "h2:mem" "hsqldb" "jtds:sqlserver" "mysql" "oracle:oci" "oracle:thin" "postgresql" "redshift" "sqlite" "sqlserver" "mssql"])
-(def ^:const supported-dbtypes #{"h2" "mysql" "postgresql" "sqlite" "sqlserver" "mssql"})
+(def ^:const dbtypes ["h2" "h2:mem" "hsqldb" "jtds:sqlserver" "mysql" "oracle:oci" "oracle:thin" "postgresql" "redshift" "sqlite" "sqlserver" "mssql" "yugabytedb"])
+(def ^:const supported-dbtypes #{"h2" "mysql" "postgresql" "sqlite" "sqlserver" "mssql" "yugabytedb"})
 
 ;; this is the link to the various connection pools
 (defonce pool (atom nil))
@@ -60,7 +60,7 @@
 
 (defn create-statement [db-type table]
   (case db-type
-    ("postgresql" "sqlite")
+    ("postgresql" "yugabytedb" "sqlite")
     [(str "CREATE TABLE IF NOT EXISTS " table " (id varchar(100) primary key, header bytea, meta bytea, val bytea)")]
     ("mssql" "sqlserver")
     [(str "IF OBJECT_ID(N'dbo." table "', N'U') IS NULL "
@@ -74,7 +74,7 @@
     "h2"
     [(str "MERGE INTO " table " (id, header, meta, val) VALUES (?, ?, ?, ?);")
      id header meta value]
-    ("postgresql" "sqlite")                                          ;
+    ("postgresql" "yugabytedb" "sqlite")                                          ;
     [(str "INSERT INTO " table " (id, header, meta, val) VALUES (?, ?, ?, ?) "
           "ON CONFLICT (id) DO UPDATE "
           "SET header = excluded.header, meta = excluded.meta, val = excluded.val;")
@@ -106,7 +106,7 @@
     [(str "MERGE INTO " table " (id, header, meta, val) "
           "SELECT ?, header, meta, val FROM " table " WHERE id = ?;")
      to from]
-    ("postgresql" "sqlite")
+    ("postgresql" "yugabytedb" "sqlite")
     [(str "INSERT INTO " table " (id, header, meta, val) "
           "SELECT ?, header, meta, val FROM " table " WHERE id = ? "
           "ON CONFLICT (id) DO UPDATE "
@@ -150,7 +150,7 @@
       (into [(str "MERGE INTO " table " (id, header, meta, val) VALUES " values-placeholder ";")]
             params)
 
-      ("postgresql" "sqlite")
+      ("postgresql" "yugabytedb" "sqlite")
       (into [(str "INSERT INTO " table " (id, header, meta, val) VALUES " values-placeholder " "
                   "ON CONFLICT (id) DO UPDATE "
                   "SET header = excluded.header, meta = excluded.meta, val = excluded.val;")]
@@ -195,6 +195,7 @@
   "Maximum keys per SELECT IN clause, by database type.
    Based on SQL parameter limits (1 param per key) and practical result set sizes."
   {"postgresql" 5000   ; 10k param limit, but cap at 5k for result set size
+   "yugabytedb" 5000   ; same as PostgreSQL
    "mssql"      1500   ; 1.8k param limit, leave headroom
    "sqlserver"  1500
    "sqlite"     500    ; 999 param limit in SQLite
@@ -399,7 +400,7 @@
                            ;; PostgreSQL: no hard limit, use 10000 params (2500 rows) for good performance
                            ;; SQLite: default 999 parameters, use 900 (225 rows) to stay under limit
                            batch-size (case (:dbtype db-spec)
-                                        "postgresql" 2500  ;; 10000 params / 4 = 2500 rows
+                                        ("postgresql" "yugabytedb") 2500  ;; 10000 params / 4 = 2500 rows
                                         ("mssql" "sqlserver") 450  ;; 1800 params / 4 = 450 rows
                                         225)  ;; 900 params / 4 = 225 rows (SQLite and default)
 
@@ -435,13 +436,13 @@
                    {}
                    (jdbc/with-transaction [tx connection]
                      (let [;; SQL Server supports IN clause with up to 2100 parameters
-                           ;; PostgreSQL, MySQL, H2, SQLite all support IN clause efficiently
+                           ;; PostgreSQL, YugabyteDB, MySQL, H2, SQLite all support IN clause efficiently
                            ;; PostgreSQL: no hard limit, but practical limit around 10k-100k
                            ;; MySQL: max_allowed_packet limits total query size, user may not know or be able to change so use conservative appraoch
                            ;; SQLite: default 999 parameters (SQLITE_MAX_VARIABLE_NUMBER)
                            ;; H2: no specific limit documented
                            batch-size (case (:dbtype db-spec)
-                                        "postgresql" 10000
+                                        ("postgresql" "yugabytedb") 10000
                                         ("mssql" "sqlserver") 1800
                                         900)
 
@@ -654,6 +655,13 @@
 
   (def db-spec
     {:dbtype "postgresql"
+     :dbname "konserve"
+     :host "localhost"
+     :user "konserve"
+     :password "password"})
+
+  (def db-spec
+    {:dbtype "yugabytedb"
      :dbname "konserve"
      :host "localhost"
      :user "konserve"
