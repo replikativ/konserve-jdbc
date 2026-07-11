@@ -2,7 +2,8 @@
   (:require [clojure.test :refer [deftest is testing use-fixtures]]
             [clojure.core.async :refer [<!!]]
             [konserve.compliance-test :refer [compliance-test]]
-            [konserve-jdbc.core :refer [release]]
+            [konserve.impl.storage-layout :as sl]
+            [konserve-jdbc.core :as jc :refer [release]]
             [konserve.store :as store]
             [konserve-jdbc.util :refer [test-multi-operations-sync
                                         test-multi-operations-async
@@ -81,3 +82,6 @@
       (test-multi-operations-async store "PostgreSQL" default-num-keys))
     (<!! (release store {:sync? false}))
     (<!! (store/delete-store spec {:sync? false}))))
+(deftest jdbc-read-miss-safe-marker-test
+  (testing "JDBC backing implements PReadMissSafe (io-operation skips the -blob-exists? SELECT probe on reads)"
+    (is (satisfies? sl/PReadMissSafe (jc/->JDBCTable nil nil nil)))))
