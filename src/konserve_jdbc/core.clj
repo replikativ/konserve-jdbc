@@ -3,6 +3,7 @@
   (:require [konserve.impl.defaults :refer [connect-default-store]]
             [konserve.impl.storage-layout :refer [PBackingStore PBackingBlob PBackingLock
                                                   PMultiWriteBackingStore PMultiReadBackingStore
+                                                  PReadMissSafe store-key-not-found-ex
                                                   -delete-store]]
             [konserve.compressor :refer [null-compressor]]
             [konserve.encryptor :refer [null-encryptor]]
@@ -291,6 +292,11 @@
                 (go-try-
                  (when-not (:header @cache)
                    (reset! cache (read-operation env (:dbtype (:db-spec table)) (:connection table) (:table table) key)))
+                 ;; PReadMissSafe: a missing row yields an empty result (no :header).
+                 ;; Signal not-found; io-operation's read-first path converts it to
+                 ;; the caller's :not-found.
+                 (when (nil? (:header @cache))
+                   (throw (store-key-not-found-ex key)))
                  (-> @cache :header))))
   (-read-meta [_ _meta-size env]
     (async+sync (:sync? env) *default-sync-translation*
@@ -513,6 +519,13 @@
                                                {}
                                                (partition-all batch-size store-keys))]
                        all-results)))))))
+
+;; JDBC reads are read-miss-safe: -create-blob only constructs a JDBCRow (no side
+;; effect), and -read-header throws store-key-not-found-ex when the row is absent
+;; (the SELECT returns no rows). So io-operation skips the -blob-exists? SELECT
+;; probe — a read is one SELECT, and update-in/assoc-in/bassoc drop their probe too.
+(extend-type JDBCTable
+  PReadMissSafe)
 
 (defn- prepare-spec [db]
   ;; next.jdbc does not officially support the credentials in the format: driver://user:password@host/db
