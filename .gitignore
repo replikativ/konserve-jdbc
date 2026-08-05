@@ -17,3 +17,6 @@ profiles.clj
 *.iml
 .clj-kondo/
 /tmp
+
+# clojure-lsp cache — machine-local, and it has been committed by accident once
+.lsp/
