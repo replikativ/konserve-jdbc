@@ -1,12 +1,10 @@
 (ns konserve-jdbc.core
   "Address globally aggregated immutable key-value stores(s)."
-  (:require [konserve.impl.defaults :refer [connect-default-store]]
+  (:require [konserve.impl.defaults :refer [connect-default-store normalize-store-config]]
             [konserve.impl.storage-layout :refer [PBackingStore PBackingBlob PBackingLock
                                                   PMultiWriteBackingStore PMultiReadBackingStore
                                                   PReadMissSafe store-key-not-found-ex
                                                   -delete-store]]
-            [konserve.compressor :refer [null-compressor]]
-            [konserve.encryptor :refer [null-encryptor]]
             [konserve.utils :refer [async+sync *default-sync-translation*]]
             [konserve.store :as store]
             [superv.async :refer [go-try- <?-]]
@@ -569,16 +567,33 @@
           db-spec (assoc db-spec :sync? (:sync? complete-opts))
           ^PooledDataSource connection (get-connection db-spec)
           backing (JDBCTable. db-spec connection table)
-          config (merge {:opts               complete-opts
-                         :config             {:sync-blob? true
-                                              :in-place? true
-                                              :no-backup? true
-                                              :lock-blob? true}
-                         :default-serializer :FressianSerializer
-                         :compressor         null-compressor
-                         :encryptor          null-encryptor
-                         :buffer-size        (* 1024 1024)}
-                        (dissoc params :opts :config))]
+          ;; `:config` IS forwarded now. It used to be dissoc'd, so the
+          ;; literal above always won and compression and encryption could not
+          ;; be configured at all -- the blob header carried a 0 whatever was
+          ;; asked for. Merged onto the defaults, so a partial `:config` keeps
+          ;; the rest.
+          ;;
+          ;; `:compressor null-compressor` / `:encryptor null-encryptor` are
+          ;; gone: `connect-default-store` has never read them, taking both
+          ;; from `(get-in config [:compressor :type])`. Dead keys that made a
+          ;; top-level spelling look supported.
+          ;;
+          ;; Normalised BEFORE our serializer default is filled: emitting
+          ;; `:default-serializer` would trip konserve 0.9.369's deprecation
+          ;; warning on every connect whatever the caller passed, and filling
+          ;; first would let it occupy the slot and silently drop a caller's
+          ;; older spelling.
+          config (-> (dissoc params :opts :config)
+                     (assoc :config (merge {:sync-blob? true
+                                            :in-place? true
+                                            :no-backup? true
+                                            :lock-blob? true}
+                                           (:config params)))
+                     normalize-store-config
+                     (update-in [:config :encoding]
+                                #(merge {:serializer :FressianSerializer} %))
+                     (update :buffer-size #(or % (* 1024 1024)))
+                     (assoc :opts complete-opts))]
       (connect-default-store backing config))))
 
 (def connect-jdbc-store connect-store) ;; this is the new standard approach for store. Old signature remains for backwards compatability. 
