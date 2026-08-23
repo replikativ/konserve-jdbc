@@ -245,12 +245,40 @@ konserve exposes that as the store's conditional-write domain:
 | Database | Domain | Orders writers |
 |---|---|---|
 | PostgreSQL, YugabyteDB, MySQL, SQL Server | `:global` | anywhere that can reach the server |
+| H2 over `tcp://` or `ssl://` | `:global` | anywhere that can reach the server |
 | SQLite, file-based H2 | `:machine` | processes on the host holding the file |
-| In-memory H2 | `:process` | one runtime |
+| H2 `mem:`, SQLite `:memory:` | `:process` | one runtime |
 
-A `:dbtype` not in that table gets no domain, and `:expected-revision` is
-refused rather than silently ignored. SQLite over a network filesystem is
-`:machine` at best — its own documentation calls locking there unreliable.
+The domain is read from the deployment, not just the `:dbtype`, because one
+dbtype spells three different things: an embedded H2 file orders every process
+on the host, an H2 `mem:` database is invisible to the process next door, and an
+H2 server orders writers anywhere on the network.
+
+A `:dbtype` this backend does not recognise gets no domain, and
+`:expected-revision` is refused rather than silently ignored. SQLite over a
+network filesystem is `:machine` at best — its own documentation calls locking
+there unreliable.
+
+### Limits
+
+- **Existing keys must be written once before they can be fenced.** The revision
+  lives in konserve's metadata and was introduced with this feature, so a key
+  last written by an older release has none. Fencing it raises
+  `:konserve/revision-unavailable` — a deliberate refusal rather than a guessed
+  "unchanged". One ordinary write gives the key a revision; the table itself
+  needs no migration.
+- **Binary values cannot be fenced.** `konserve.core/bassoc` refuses
+  `:expected-revision` in konserve itself, so a pointer stored with `bassoc` gets
+  no fencing on any backend.
+- **Multi-key operations cannot be fenced.** `multi-assoc` and `multi-dissoc`
+  both refuse the option; there is nothing coherent to compare across a batch.
+- **`:config {:in-place? false}` is refused at connect time.** That layout writes
+  `<key>.new` and renames it into place, but a rename here is `UPDATE ... SET id`
+  and the primary key rejects it whenever the destination exists — so the second
+  write to any key failed, with or without fencing. It is now an error rather
+  than a surprise.
+- **`:jdbcUrl` with H2 does not work** (pre-existing): `connection/uri->db-spec`
+  returns no `:dbtype` for `jdbc:h2:` URLs. Use `:dbtype "h2"` with `:dbname`.
 
 ## Supported Databases
 

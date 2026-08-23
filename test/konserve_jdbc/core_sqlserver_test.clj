@@ -10,6 +10,8 @@
                                         test-concurrent-create-if-absent
                                         test-duplicate-insert-is-classified
                                         test-comparison-is-byte-exact
+                                        test-enumeration-does-not-break-fenced-writes
+                                        test-multi-read-cannot-poison-a-fenced-write
                                         default-num-keys]])
   (:import [java.util UUID]))
 
@@ -67,7 +69,8 @@
     (testing "Conditional write contract on SQL Server"
       (test-conditional-writes #(do (store/delete-store spec {:sync? true})
                                     (store/connect-store spec {:sync? true}))
-                               #(release % {:sync? true})))
+                               #(release % {:sync? true})
+                               :global))
     (store/delete-store spec {:sync? true})))
 
 (deftest jdbc-fence-mechanism-test
@@ -97,4 +100,21 @@
       (test-concurrent-create-if-absent #(store/connect-store spec {:sync? true})
                                         #(release % {:sync? true})
                                         4))
+    (store/delete-store spec {:sync? true})))
+
+(deftest jdbc-enumeration-vs-fenced-write-test
+  (let [spec (assoc db-spec :table "swept_counter_test_ss")
+        _ (store/delete-store spec {:sync? true})]
+    (testing "A k/keys sweep does not manufacture conflicts on SQL Server"
+      (test-enumeration-does-not-break-fenced-writes #(store/connect-store spec {:sync? true})
+                                                     #(release % {:sync? true})
+                                                     150))
+    (store/delete-store spec {:sync? true})))
+
+(deftest jdbc-multi-read-poisoning-test
+  (let [spec (assoc db-spec :table "poison_test_ss")
+        _ (store/delete-store spec {:sync? true})]
+    (testing "A multi-read cannot redirect a fenced write on SQL Server"
+      (test-multi-read-cannot-poison-a-fenced-write #(store/connect-store spec {:sync? true})
+                                                    #(release % {:sync? true})))
     (store/delete-store spec {:sync? true})))

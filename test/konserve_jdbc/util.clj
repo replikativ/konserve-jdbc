@@ -192,9 +192,19 @@
    not merely reconnecting: `conditional-write-compliance-test` already covers
    sync AND async, so it writes `:cas-async` itself, and the async variant that
    follows would then find its create-if-absent key already present."
-  [fresh! release!]
+  [fresh! release! expected-domain]
   (let [a (fresh!)]
-    (try (ct/conditional-write-compliance-test a) (finally (release! a))))
+    (try
+      ;; Pinned, because the compliance test BRANCHES on the capability: a store
+      ;; that declares none takes the "refuses rather than ignores" arm and passes.
+      ;; Without this line the whole contract test stays green with the fence
+      ;; removed, which is no test at all. It also pins the domain VALUE — a
+      ;; `:global` silently becoming `:machine` is a promise quietly withdrawn.
+      (is (k/conditional-write? a) "the store must declare conditional-write support")
+      (is (= expected-domain (k/conditional-write-domain a)))
+      (is (k/conditional-write? a expected-domain))
+      (ct/conditional-write-compliance-test a)
+      (finally (release! a))))
   (let [b (fresh!)]
     (try (<!! (ct/async-conditional-write-compliance-test b)) (finally (release! b)))))
 
@@ -234,7 +244,15 @@
     (try
       (doseq [f (mapv #(future (run %)) stores)] @f)
       (let [final (k/get (first stores) k nil {:sync? true})]
-        (is (= (* writers per-writer) @committed))
+        ;; NOT asserted: that `committed` reached its target. Every loop iteration
+        ;; increments it exactly once before exiting, so it is true by
+        ;; construction and proves nothing.
+        ;;
+        ;; Asserted instead: that the run was actually contended. Four writers on
+        ;; ONE key produce refusals in the hundreds; a run with none would mean the
+        ;; writers had serialised and the counter agreeing would be worth nothing.
+        (is (pos? @conflicts)
+            "no writer was ever refused, so this run did not exercise the fence")
         (is (= (* writers per-writer) final)
             (str "lost updates: " (- (* writers per-writer) final)
                  " of " (* writers per-writer) " committed increments are missing"))
@@ -333,3 +351,84 @@
       (is (= (dec writers) @losers) "every other creator must be told it lost")
       (finally
         (doseq [s stores] (try (release! s) (catch Exception _ nil)))))))
+
+(defn test-enumeration-does-not-break-fenced-writes
+  "A `k/keys` sweep must not manufacture conflicts.
+
+   `list-keys` opens and closes a row for EVERY key it enumerates, and
+   `konserve.core/keys` takes no lock at all — so anything the backing evicts on
+   close, an enumeration can evict out from under an in-flight conditional write.
+   `konserve.gc/sweep!` runs through exactly this path, which makes a background
+   GC enough to trigger it.
+
+   A SOLE writer, therefore: no competing writer exists, so every rejection this
+   sees is manufactured. Measured before the eviction was gated: 17 of 300."
+  [connect! release! iterations]
+  (let [store (connect!)
+        k :swept-counter
+        sweeping (atom true)
+        spurious (atom 0)]
+    (try
+      (k/assoc store k 0 {:sync? true})
+      (dotimes [i 40] (k/assoc store (keyword (str "filler-" i)) i {:sync? true}))
+      (let [sweeper (future (while @sweeping (k/keys store {:sync? true})))]
+        (try
+          (dotimes [_ iterations]
+            (let [[v rev] (k/get store k nil {:sync? true :with-revision? true})]
+              (try (k/assoc store k (inc v) {:sync? true :expected-revision rev})
+                   (catch Exception e
+                     (if (= :konserve/revision-mismatch (:type (ex-data e)))
+                       (swap! spurious inc)
+                       (throw e))))))
+          (finally (reset! sweeping false) @sweeper)))
+      (is (zero? @spurious)
+          (str @spurious " of " iterations " fenced writes were rejected with no competing writer"))
+      (is (= iterations (k/get store k nil {:sync? true})))
+      (finally (try (release! store) (catch Exception _ nil))))))
+
+(defn test-multi-read-cannot-poison-a-fenced-write
+  "A concurrent multi-read must not decide what a fenced write compares against.
+
+   The backing has to remember the metadata its read saw, because konserve calls
+   `-sync` on a different row than the one it read from. `multi-get` forwards
+   whatever opts it is handed, takes no per-key lock, and never closes its rows —
+   so if any read carrying `:expected-revision` were allowed to deposit, a
+   multi-read could replace an in-flight conditional write's remembered metadata
+   with NEWER metadata, and that write would then compare against the value that
+   overtook it and land on top.
+
+   Deterministic, not a race: the conditional write is parked inside its `up-fn`,
+   which runs after konserve's revision check and before the row is synced."
+  [connect! release!]
+  (let [a (connect!)
+        b (connect!)
+        k :poison-target
+        entered (promise)
+        gate (promise)]
+    (try
+      (k/assoc a k {:v :original} {:sync? true})
+      (let [[_ rev] (k/get a k nil {:sync? true :with-revision? true})
+            writer (future
+                     (try (k/update-in a [k] (fn [v]
+                                               (deliver entered true)
+                                               (deref gate 20000 :timeout)
+                                               (assoc v :v :stale))
+                                       {:sync? true :expected-revision rev})
+                          ::wrote
+                          (catch Exception e (:type (ex-data e) e))))]
+        (deref entered 20000 nil)
+        ;; someone else commits while the fenced write is parked
+        (k/assoc b k {:v :winner} {:sync? true})
+        ;; the poisoning read: same store as the parked write, same key, and it
+        ;; carries the option. Backgrounded with a timeout only so a future
+        ;; konserve that DID take the lock here would not hang the suite.
+        (deref (future (try (k/multi-get a [k] {:sync? true :expected-revision rev})
+                            (catch Exception _ nil)))
+               5000 nil)
+        (deliver gate true)
+        (is (= :konserve/revision-mismatch (deref writer 20000 :never-returned))
+            "the parked write was derived from metadata that has since been replaced")
+        (is (= {:v :winner} (k/get a k nil {:sync? true}))
+            "the value that committed in between must survive"))
+      (finally
+        (doseq [s [a b]] (try (release! s) (catch Exception _ nil)))))))

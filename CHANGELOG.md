@@ -22,6 +22,14 @@ All notable, user-visible changes to konserve-jdbc are documented here.
   too; and SQLite reports a duplicate key with no SQLSTATE at all, so the refusal
   is recognised by its vendor code as well as by SQLSTATE class 23.
 
+  Existing tables work unchanged, but an existing KEY carries no revision until it
+  is written once: the token is part of the metadata this konserve version
+  introduced, and konserve refuses to fence a key that predates it
+  (`:konserve/revision-unavailable`) rather than guess that it is unchanged.
+
+  Not fenceable, and each says so rather than ignoring the option: `bassoc`
+  (konserve's own policy for binary values), `multi-assoc`, and `multi-dissoc`.
+
 - **Read-miss-safe reads (one SELECT, no probe).** The JDBC backing implements
   konserve's `PReadMissSafe` and `-read-header` throws `store-key-not-found-ex` when
   the row is absent (the SELECT returns no rows). On a konserve that supports the
@@ -30,4 +38,13 @@ All notable, user-visible changes to konserve-jdbc are documented here.
   Requires konserve `0.9.354`+.
 
 ### Changed
+- **`:config {:in-place? false}` is now refused at connect time.** It never worked
+  on this backend — the layout renames `<key>.new` over `<key>`, but a rename is
+  `UPDATE ... SET id = ?` and the primary key refuses it whenever the destination
+  row exists, so the second write to any key failed. It would also have bypassed
+  the fence silently. An explicit error replaces both.
+- `konserve-jdbc.core/->JDBCTable` takes a fourth positional argument (the
+  conditional-write read cache). Code that constructs the record directly rather
+  than through `connect-store` needs updating; `connect-store` itself is
+  unchanged.
 - konserve `0.9.342` → `0.9.376`.

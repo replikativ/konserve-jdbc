@@ -125,9 +125,19 @@
    so the vendor code is matched too — narrowly, by driver class name, because
    the number 19 means nothing in particular anywhere else."
   [^java.sql.SQLException e]
-  (or (some-> (.getSQLState e) (subs 0 2) (= "23"))
+  (or (some-> (.getSQLState e) (str/starts-with? "23"))
       (and (= "org.sqlite.SQLiteException" (.getName (class e)))
            (= 19 (.getErrorCode e)))))
+
+(def ^:const fenced-write-operations
+  "The `:operation` values konserve puts in the env of a CONDITIONAL write. The
+   read it takes under the lock to evaluate that write carries the same one, which
+   is what lets the read path tell itself apart from every other read."
+  #{:write-edn :write-binary})
+
+(defn fenced-read? [env]
+  (and (:expected-revision env)
+       (contains? fenced-write-operations (:operation env))))
 
 (defn update-statement [db-type table id header meta value]
   (case db-type
@@ -394,12 +404,20 @@
     ;; closes the row it read from after the write it fenced has finished either
     ;; way — so this is where the entry is guaranteed to go.
     ;;
-    ;; Should that order ever change and the entry disappear too early, the write
-    ;; finds nothing cached, takes the create-if-absent INSERT, and the primary key
-    ;; refuses it: a mismatch reported for a write that was merely mistimed. That
-    ;; is the direction to fail in — the alternative, treating a missing entry as
-    ;; permission to overwrite, is the silent loss the fence exists to prevent.
-    (swap! (:read-cache table) dissoc key)
+    ;; Gated on the SAME predicate as the deposit, and that gate is load-bearing
+    ;; rather than an optimisation. `list-keys` opens and closes a row for every
+    ;; key it enumerates, and `konserve.core/keys` takes no lock at all — so an
+    ;; unguarded eviction here lets an enumeration (or `konserve.gc/sweep!`, which
+    ;; runs through it) delete the entry between a fenced write's read and its
+    ;; `-sync`. Measured before the gate: a SOLE writer doing 300 fenced
+    ;; increments alongside a `k/keys` loop got 17 rejections, none of them real.
+    ;;
+    ;; The failure was in the safe direction — the write turns into the
+    ;; create-if-absent INSERT and the primary key refuses it, so nothing is lost
+    ;; — but a caller cannot tell a manufactured conflict from a true one, and
+    ;; retrying forever is not a fix.
+    (when (fenced-read? env)
+      (swap! (:read-cache table) dissoc key))
     (if (:sync? env) nil (go-try- nil)))
   (-get-lock [_ env]
     (if (:sync? env) true (go-try- true)))                       ;; May not return nil, otherwise eternal retries
@@ -413,12 +431,20 @@
                  ;; the caller's :not-found.
                  (when (nil? (:header @cache))
                    (throw (store-key-not-found-ex key)))
-                 ;; Remember the META for a fenced `-sync`, and only for one. The read
-                 ;; preceding a conditional write carries `:expected-revision` in its
-                 ;; env, so we can tell — caching on every read would hold metadata for
-                 ;; every key a store ever touched.
+                 ;; Remember the META for a fenced `-sync`, and only for that.
+                 ;;
+                 ;; `fenced-read?` is deliberately narrow. `:expected-revision` alone
+                 ;; is not enough: `multi-get` forwards whatever opts it is handed,
+                 ;; takes no per-key lock and never closes its rows, so a multi-read
+                 ;; carrying that option would deposit metadata NEWER than the one an
+                 ;; in-flight fenced write on this store already validated — and that
+                 ;; write would then compare against it and land, which is exactly the
+                 ;; lost update this exists to prevent. Only the read konserve takes
+                 ;; under the lock as part of a conditional write may deposit, and
+                 ;; that read carries the write's own `:operation`.
+                 ;;
                  ;; `read-operation` has already turned an H2 Blob into bytes.
-                 (when (:expected-revision env)
+                 (when (fenced-read? env)
                    (when-let [m (:meta @cache)]
                      (swap! (:read-cache table) assoc key m)))
                  (-> @cache :header))))
@@ -454,30 +480,50 @@
     (async+sync (:sync? env) *default-sync-translation*
                 (go-try- (swap! data assoc :value blob)))))
 
-(def ^:const conditional-write-domains
-  "How far a fenced write reaches, per database. The MECHANISM is the same
-   everywhere — one `UPDATE ... WHERE meta = ?`, evaluated by the database — but
-   the REACH is a property of where that database runs, and this backend talks to
-   several kinds.
-
-   A server on the network is reachable from any host, so its comparison orders
-   every writer anywhere. SQLite is a file: it orders processes on the machine
-   holding it, and no further — and not even that on a network filesystem, where
-   its locking is documented as unreliable. An in-memory H2 has no writers outside
-   its own runtime.
-
-   A database not listed here gets NO domain and `:expected-revision` is refused.
-   The statement would work on any SQL database; what cannot be guessed is how far
-   its answer reaches, and guessing generously is how a deployment comes to believe
-   it is fenced across hosts when it is not."
+(def ^:const server-conditional-write-domains
+  "How far a fenced write reaches, for the databases that are SERVERS. The
+   mechanism is the same everywhere — one `UPDATE ... WHERE meta = ?`, evaluated
+   by the database — but the reach is a property of where that database runs, and
+   a server on the network is reachable from any host, so its comparison orders
+   every writer anywhere."
   {"postgresql" :global
    "yugabytedb" :global
    "mysql"      :global
    "mssql"      :global
-   "sqlserver"  :global
-   "sqlite"     :machine
-   "h2"         :machine
-   "h2:mem"     :process})
+   "sqlserver"  :global})
+
+(defn conditional-write-domain
+  "How far this store's fence reaches: `:global`, `:machine`, `:process`, or nil.
+
+   For the servers it follows the dbtype. For the two embedded databases it
+   cannot, because one dbtype spells three different deployments and the
+   difference is the whole answer:
+
+     - `h2` with a `mem:` name, and sqlite with `:memory:`, live in one JVM heap.
+       A second process on the same host opens an entirely DIFFERENT database, so
+       the honest domain is `:process`. Reporting `:machine` here would be an
+       OVER-claim — a caller asking `(conditional-write? store :machine)` would be
+       told yes about writers that cannot even see this data.
+     - `h2` reached over `tcp://` or `ssl://` is a server like any other, and
+       orders writers anywhere on the network: `:global`.
+     - otherwise both are a file, ordering processes on the host that holds it and
+       no further — and not even that on a network filesystem, where SQLite's own
+       documentation calls locking unreliable.
+
+   A database this does not recognise gets NO domain and `:expected-revision` is
+   refused. The statement would work on any SQL database; what cannot be guessed
+   is how far its answer reaches, and guessing generously is how a deployment
+   comes to believe it is fenced across hosts when it is not."
+  [{:keys [dbtype dbname]}]
+  (let [name* (str/lower-case (str dbname))]
+    (case dbtype
+      "h2" (cond
+             (str/starts-with? name* "mem:") :process
+             (or (str/starts-with? name* "tcp://")
+                 (str/starts-with? name* "ssl://")) :global
+             :else :machine)
+      "sqlite" (if (str/starts-with? name* ":memory:") :process :machine)
+      (get server-conditional-write-domains dbtype))))
 
 (defrecord JDBCTable [db-spec connection table read-cache]
   ;; The database evaluates the comparison — one statement, atomic on its own — so
@@ -488,7 +534,7 @@
 
   protocols/PConditionalWrite
   (-conditional-write-domain [_]
-    (get conditional-write-domains (:dbtype db-spec)))
+    (conditional-write-domain db-spec))
 
   PBackingStore
   (-create-blob [this store-key env]
@@ -511,7 +557,7 @@
                            ;; before `-sync` could spend it. Left behind, it would
                            ;; turn the next create-if-absent into an UPDATE that
                            ;; matches nothing and reports a mismatch that is not one.
-                           (when-not exists?
+                           (when (and (not exists?) (:expected-revision env))
                              (swap! read-cache dissoc store-key))
                            exists?))))
   (-copy [_ from to env]
@@ -607,6 +653,16 @@
   (-multi-delete-blobs [this store-keys env]
     (async+sync (:sync? env) *default-sync-translation*
                 (go-try-
+                 ;; `multi-assoc` refuses `:expected-revision` in konserve itself;
+                 ;; `multi-dissoc` forwards its opts here unchecked, so without this
+                 ;; a caller asking for a fenced batch delete would be told it
+                 ;; happened while the option was quietly dropped. There is nothing
+                 ;; to fence against across a batch — the delete is atomic, the
+                 ;; comparison would not be — so the honest answer is to refuse.
+                 (when (:expected-revision env)
+                   (throw (ex-info "multi-dissoc cannot be made conditional: :expected-revision is not supported for multi-key deletes."
+                                   {:type :konserve/conditional-write-unsupported
+                                    :operation :multi-dissoc})))
                  (if (empty? store-keys)
                    {}
                    (jdbc/with-transaction [tx connection]
@@ -754,6 +810,25 @@
           ;; warning on every connect whatever the caller passed, and filling
           ;; first would let it occupy the slot and silently drop a caller's
           ;; older spelling.
+          _ (when (false? (:in-place? (:config params)))
+              ;; Refused rather than honoured, because this backing cannot do it.
+              ;; The layout writes `<key>.new` and then renames it over `<key>`,
+              ;; but `-atomic-move` is `UPDATE ... SET id = ?` and the primary key
+              ;; refuses that whenever the destination row still exists — so the
+              ;; SECOND write to any key fails. Measured on Postgres: create ok,
+              ;; overwrite `duplicate key value violates unique constraint`.
+              ;;
+              ;; It also breaks the fence. The metadata a conditional write
+              ;; compares is remembered under the real key, so a write aimed at
+              ;; `<key>.new` finds none, takes create-if-absent, and the rename
+              ;; that follows is unconditional — nothing compares anything. Left
+              ;; reachable, that is a silent lost update in a configuration that
+              ;; was already broken for ordinary writes.
+              (throw (ex-info (str ":in-place? false is not supported by konserve-jdbc. A row is "
+                                   "updated in place; the rename this layout needs collides with "
+                                   "the primary key, and a conditional write could not be fenced.")
+                              {:type :konserve.jdbc/unsupported-config
+                               :config (:config params)})))
           config (-> (dissoc params :opts :config)
                      (assoc :config (merge {:sync-blob? true
                                             :in-place? true
