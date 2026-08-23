@@ -6,6 +6,11 @@
             [konserve.store :as store]
             [konserve-jdbc.util :refer [with-dir test-multi-operations-sync
                                         test-multi-operations-async
+                                        test-conditional-writes
+                                        test-concurrent-fenced-counter
+                                        test-concurrent-create-if-absent
+                                        test-duplicate-insert-is-classified
+                                        test-comparison-is-byte-exact
                                         default-num-keys]])
   (:import [java.util UUID]))
 
@@ -54,3 +59,41 @@
       (test-multi-operations-async store "H2" default-num-keys))
     (<!! (release store {:sync? false}))
     (<!! (store/delete-store spec {:sync? false}))))
+
+(deftest jdbc-conditional-write-test
+  (let [spec (assoc db-spec :table "conditional_test")
+        _ (store/delete-store spec {:sync? true})]
+    (testing "Conditional write contract on H2"
+      (test-conditional-writes #(do (store/delete-store spec {:sync? true})
+                                    (store/connect-store spec {:sync? true}))
+                               #(release % {:sync? true})))
+    (store/delete-store spec {:sync? true})))
+
+(deftest jdbc-concurrent-fenced-counter-test
+  (let [spec (assoc db-spec :table "fenced_counter_test")
+        _ (store/delete-store spec {:sync? true})]
+    (testing "Concurrent fenced increments on H2 lose nothing"
+      (test-concurrent-fenced-counter #(store/connect-store spec {:sync? true})
+                                      #(release % {:sync? true})
+                                      4 15))
+    (store/delete-store spec {:sync? true})))
+
+(deftest jdbc-fence-mechanism-test
+  (let [spec (assoc db-spec :table "fence_mechanism_test")
+        _ (store/delete-store spec {:sync? true})
+        store (store/connect-store spec {:sync? true})]
+    (testing "The database refuses a duplicate key in a way we can classify (H2)"
+      (test-duplicate-insert-is-classified store))
+    (testing "The fenced comparison is byte-exact (H2)"
+      (test-comparison-is-byte-exact store))
+    (release store {:sync? true})
+    (store/delete-store spec {:sync? true})))
+
+(deftest jdbc-concurrent-create-if-absent-test
+  (let [spec (assoc db-spec :table "contested_create_test")
+        _ (store/delete-store spec {:sync? true})]
+    (testing "Contested create-if-absent on H2 has exactly one winner"
+      (test-concurrent-create-if-absent #(store/connect-store spec {:sync? true})
+                                        #(release % {:sync? true})
+                                        4))
+    (store/delete-store spec {:sync? true})))
