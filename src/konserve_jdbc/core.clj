@@ -1,6 +1,7 @@
 (ns konserve-jdbc.core
   "Address globally aggregated immutable key-value stores(s)."
-  (:require [konserve.impl.defaults :refer [connect-default-store normalize-store-config]]
+  (:require [konserve.protocols :as protocols]
+            [konserve.impl.defaults :refer [connect-default-store normalize-store-config]]
             [konserve.impl.storage-layout :refer [PBackingStore PBackingBlob PBackingLock
                                                   PMultiWriteBackingStore PMultiReadBackingStore
                                                   PReadMissSafe store-key-not-found-ex
@@ -67,6 +68,76 @@
           "CREATE TABLE dbo." table " (id varchar(100) primary key, header varbinary(max), meta varbinary(max), val varbinary(max)); "
           "END;")]
     [(str "CREATE TABLE IF NOT EXISTS " table " (id varchar(100) primary key, header longblob, meta longblob, val longblob);")]))
+
+(defn fenced-update-statement
+  "Replace the row for `id`, but only while its `meta` column still holds
+   `expected-meta`. Row count 1 means the write happened, 0 that it was refused.
+
+   ONE statement, so the comparison and the write are the same step — the database
+   evaluates it, which is what makes this backing's guarantee reach as far as the
+   database does. No transaction is needed for that; an UPDATE is atomic on its
+   own.
+
+   The comparison is on the META column rather than a separate version column.
+   konserve's revision lives inside the serialized metadata, so for this row the
+   meta bytes ARE the revision, and comparing them needs no schema change and no
+   migration for existing tables.
+
+   SQL Server needs the length too. Its varbinary comparison treats trailing zero
+   bytes as insignificant, so two values of different lengths can compare EQUAL —
+   which for a fence means a stale write passing. Microsoft's own guidance is to
+   test the length alongside the data, and DATALENGTH is how. The other dialects
+   compare binary exactly: bytea, longblob and SQLite BLOBs are all memcmp."
+  [db-type table id header meta value expected-meta]
+  (case db-type
+    ("mssql" "sqlserver")
+    [(str "UPDATE dbo." table " SET header = ?, meta = ?, val = ? "
+          "WHERE id = ? AND meta = ? AND DATALENGTH(meta) = ?")
+     header meta value id expected-meta (count expected-meta)]
+    [(str "UPDATE " table " SET header = ?, meta = ?, val = ? "
+          "WHERE id = ? AND meta = ?")
+     header meta value id expected-meta]))
+
+(defn fenced-insert-statement
+  "Insert the row for `id`, relying on the PRIMARY KEY to refuse it if the row
+   already exists — which is create-if-absent, evaluated by the database.
+
+   A plain INSERT rather than a dialect-specific upsert precisely because it must
+   NOT overwrite. The refusal arrives as an integrity-constraint violation, which
+   is SQLSTATE class 23 in the standard and in every driver here."
+  [db-type table id header meta value]
+  (case db-type
+    ("mssql" "sqlserver")
+    [(str "INSERT INTO dbo." table " (id, header, meta, val) VALUES (?, ?, ?, ?)")
+     id header meta value]
+    [(str "INSERT INTO " table " (id, header, meta, val) VALUES (?, ?, ?, ?)")
+     id header meta value]))
+
+(defn integrity-violation?
+  "Is this the database refusing a duplicate primary key?
+
+   SQLSTATE class 23 is the standard's integrity-constraint violation. Measured
+   against every database this backend supports: postgres 23505, mysql 23000,
+   h2 23505, sqlserver 23000 — and sqlite, which reports NO SQLSTATE at all
+   (`nil`) and carries the refusal in the vendor code instead, 19 for
+   SQLITE_CONSTRAINT. Missing that case would turn create-if-absent on sqlite
+   from a clean rejection into a raw driver exception the caller cannot classify,
+   so the vendor code is matched too — narrowly, by driver class name, because
+   the number 19 means nothing in particular anywhere else."
+  [^java.sql.SQLException e]
+  (or (some-> (.getSQLState e) (str/starts-with? "23"))
+      (and (= "org.sqlite.SQLiteException" (.getName (class e)))
+           (= 19 (.getErrorCode e)))))
+
+(def ^:const fenced-write-operations
+  "The `:operation` values konserve puts in the env of a CONDITIONAL write. The
+   read it takes under the lock to evaluate that write carries the same one, which
+   is what lets the read path tell itself apart from every other read."
+  #{:write-edn :write-binary})
+
+(defn fenced-read? [env]
+  (and (:expected-revision env)
+       (contains? fenced-write-operations (:operation env))))
 
 (defn update-statement [db-type table id header meta value]
   (case db-type
@@ -276,13 +347,77 @@
   PBackingBlob
   (-sync [_ env]
     (async+sync (:sync? env) *default-sync-translation*
-                (go-try- (let [{:keys [header meta value]} @data]
+                (go-try- (let [{:keys [header meta value]} @data
+                               db-type (:dbtype (:db-spec table))
+                               expected-revision (:expected-revision env)]
                            (if (and header meta value)
-                             (let [ps (update-statement (:dbtype (:db-spec table)) (:table table) key header meta value)]
-                               (jdbc/execute-one! (:connection table) ps))
+                             (if expected-revision
+                               ;; FENCED. konserve has already compared the revision
+                               ;; it read against the caller's; the statement below
+                               ;; closes the window BETWEEN that read and this write,
+                               ;; which is the half no counter can do. Both together
+                               ;; are the compare-and-set.
+                               ;;
+                               ;; What was read is remembered by the read path, since
+                               ;; `-sync` runs on a DIFFERENT row record than the read
+                               ;; did. No entry means no read happened, which for a
+                               ;; fenced write is create-if-absent — and that is a
+                               ;; plain INSERT, refused by the primary key.
+                               (let [cache (:read-cache table)
+                                     expected (get @cache key ::absent)]
+                                 (try
+                                   (if (= ::absent expected)
+                                     (try
+                                       (jdbc/execute-one!
+                                        (:connection table)
+                                        (fenced-insert-statement db-type (:table table) key header meta value))
+                                       (catch java.sql.SQLException e
+                                         (if (integrity-violation? e)
+                                           (throw (ex-info "Conditional write rejected: the key already exists."
+                                                           {:type :konserve/revision-mismatch
+                                                            :key key
+                                                            :expected expected-revision}))
+                                           (throw e))))
+                                     (let [res (jdbc/execute-one!
+                                                (:connection table)
+                                                (fenced-update-statement db-type (:table table) key
+                                                                         header meta value expected))
+                                           updated (:next.jdbc/update-count res 0)]
+                                       (when-not (pos? updated)
+                                         ;; No row matched, so the stored metadata is
+                                         ;; not the one this write was derived from.
+                                         (throw (ex-info (str "Conditional write rejected: the stored metadata is "
+                                                              "not the one this write was derived from.")
+                                                         {:type :konserve/revision-mismatch
+                                                          :key key
+                                                          :expected expected-revision})))))
+                                   (finally
+                                     ;; Whatever happened, this read is spent.
+                                     (swap! cache dissoc key))))
+                               (let [ps (update-statement db-type (:table table) key header meta value)]
+                                 (jdbc/execute-one! (:connection table) ps)))
                              (throw (ex-info "Updating a row is only possible if header, meta and value are set." {:data @data})))
                            (reset! data {})))))
   (-close [_ env]
+    ;; The remembered metadata belongs to ONE operation. `-sync` spends it, but a
+    ;; fenced write whose revision check fails never reaches `-sync`, and konserve
+    ;; closes the row it read from after the write it fenced has finished either
+    ;; way — so this is where the entry is guaranteed to go.
+    ;;
+    ;; Gated on the SAME predicate as the deposit, and that gate is load-bearing
+    ;; rather than an optimisation. `list-keys` opens and closes a row for every
+    ;; key it enumerates, and `konserve.core/keys` takes no lock at all — so an
+    ;; unguarded eviction here lets an enumeration (or `konserve.gc/sweep!`, which
+    ;; runs through it) delete the entry between a fenced write's read and its
+    ;; `-sync`. Measured before the gate: a SOLE writer doing 300 fenced
+    ;; increments alongside a `k/keys` loop got 17 rejections, none of them real.
+    ;;
+    ;; The failure was in the safe direction — the write turns into the
+    ;; create-if-absent INSERT and the primary key refuses it, so nothing is lost
+    ;; — but a caller cannot tell a manufactured conflict from a true one, and
+    ;; retrying forever is not a fix.
+    (when (fenced-read? env)
+      (swap! (:read-cache table) dissoc key))
     (if (:sync? env) nil (go-try- nil)))
   (-get-lock [_ env]
     (if (:sync? env) true (go-try- true)))                       ;; May not return nil, otherwise eternal retries
@@ -296,6 +431,22 @@
                  ;; the caller's :not-found.
                  (when (nil? (:header @cache))
                    (throw (store-key-not-found-ex key)))
+                 ;; Remember the META for a fenced `-sync`, and only for that.
+                 ;;
+                 ;; `fenced-read?` is deliberately narrow. `:expected-revision` alone
+                 ;; is not enough: `multi-get` forwards whatever opts it is handed,
+                 ;; takes no per-key lock and never closes its rows, so a multi-read
+                 ;; carrying that option would deposit metadata NEWER than the one an
+                 ;; in-flight fenced write on this store already validated — and that
+                 ;; write would then compare against it and land, which is exactly the
+                 ;; lost update this exists to prevent. Only the read konserve takes
+                 ;; under the lock as part of a conditional write may deposit, and
+                 ;; that read carries the write's own `:operation`.
+                 ;;
+                 ;; `read-operation` has already turned an H2 Blob into bytes.
+                 (when (fenced-read? env)
+                   (when-let [m (:meta @cache)]
+                     (swap! (:read-cache table) assoc key m)))
                  (-> @cache :header))))
   (-read-meta [_ _meta-size env]
     (async+sync (:sync? env) *default-sync-translation*
@@ -329,7 +480,62 @@
     (async+sync (:sync? env) *default-sync-translation*
                 (go-try- (swap! data assoc :value blob)))))
 
-(defrecord JDBCTable [db-spec connection table]
+(def ^:const server-conditional-write-domains
+  "How far a fenced write reaches, for the databases that are SERVERS. The
+   mechanism is the same everywhere — one `UPDATE ... WHERE meta = ?`, evaluated
+   by the database — but the reach is a property of where that database runs, and
+   a server on the network is reachable from any host, so its comparison orders
+   every writer anywhere."
+  {"postgresql" :global
+   "yugabytedb" :global
+   "mysql"      :global
+   "mssql"      :global
+   "sqlserver"  :global})
+
+(defn conditional-write-domain
+  "How far this store's fence reaches: `:global`, `:machine`, `:process`, or nil.
+
+   For the servers it follows the dbtype. For the two embedded databases it
+   cannot, because one dbtype spells three different deployments and the
+   difference is the whole answer:
+
+     - `h2` with a `mem:` name, and sqlite with `:memory:`, live in one JVM heap.
+       A second process on the same host opens an entirely DIFFERENT database, so
+       the honest domain is `:process`. Reporting `:machine` here would be an
+       OVER-claim — a caller asking `(conditional-write? store :machine)` would be
+       told yes about writers that cannot even see this data.
+     - `h2` reached over `tcp://` or `ssl://` is a server like any other, and
+       orders writers anywhere on the network: `:global`.
+     - otherwise both are a file, ordering processes on the host that holds it and
+       no further — and not even that on a network filesystem, where SQLite's own
+       documentation calls locking unreliable.
+
+   A database this does not recognise gets NO domain and `:expected-revision` is
+   refused. The statement would work on any SQL database; what cannot be guessed
+   is how far its answer reaches, and guessing generously is how a deployment
+   comes to believe it is fenced across hosts when it is not."
+  [{:keys [dbtype dbname]}]
+  (let [name* (str/lower-case (str dbname))]
+    (case dbtype
+      "h2" (cond
+             (str/starts-with? name* "mem:") :process
+             (or (str/starts-with? name* "tcp://")
+                 (str/starts-with? name* "ssl://")) :global
+             :else :machine)
+      "sqlite" (if (str/starts-with? name* ":memory:") :process :machine)
+      (get server-conditional-write-domains dbtype))))
+
+(defrecord JDBCTable [db-spec connection table read-cache]
+  ;; The database evaluates the comparison — one statement, atomic on its own — so
+  ;; konserve adds no mechanism of its own: no sidecar row, no lock. Declared
+  ;; rather than inferred from the domain, since this backend fences itself at
+  ;; three different reaches depending on which database it is talking to.
+  protocols/PSelfConditionalWrite
+
+  protocols/PConditionalWrite
+  (-conditional-write-domain [_]
+    (conditional-write-domain db-spec))
+
   PBackingStore
   (-create-blob [this store-key env]
     (async+sync (:sync? env) *default-sync-translation*
@@ -341,8 +547,19 @@
   (-blob-exists? [_ store-key env]
     (async+sync (:sync? env) *default-sync-translation*
                 (go-try- (let [res (jdbc/execute! connection
-                                                  [(str "SELECT 1 FROM " table " WHERE id = ?;") store-key])]
-                           (not (nil? (first res)))))))
+                                                  [(str "SELECT 1 FROM " table " WHERE id = ?;") store-key])
+                               exists? (not (nil? (first res)))]
+                           ;; This probe is what konserve uses, under the lock, to
+                           ;; decide whether a fenced write reads the old row at all.
+                           ;; If the row is gone, no read will follow, so anything
+                           ;; this key left in the read cache is stale — from an
+                           ;; earlier fenced attempt whose revision check failed
+                           ;; before `-sync` could spend it. Left behind, it would
+                           ;; turn the next create-if-absent into an UPDATE that
+                           ;; matches nothing and reports a mismatch that is not one.
+                           (when (and (not exists?) (:expected-revision env))
+                             (swap! read-cache dissoc store-key))
+                           exists?))))
   (-copy [_ from to env]
     (async+sync (:sync? env) *default-sync-translation*
                 (go-try- (jdbc/execute! connection (copy-row-statement (:dbtype db-spec) table to from)))))
@@ -436,6 +653,16 @@
   (-multi-delete-blobs [this store-keys env]
     (async+sync (:sync? env) *default-sync-translation*
                 (go-try-
+                 ;; `multi-assoc` refuses `:expected-revision` in konserve itself;
+                 ;; `multi-dissoc` forwards its opts here unchecked, so without this
+                 ;; a caller asking for a fenced batch delete would be told it
+                 ;; happened while the option was quietly dropped. There is nothing
+                 ;; to fence against across a batch — the delete is atomic, the
+                 ;; comparison would not be — so the honest answer is to refuse.
+                 (when (:expected-revision env)
+                   (throw (ex-info "multi-dissoc cannot be made conditional: :expected-revision is not supported for multi-key deletes."
+                                   {:type :konserve/conditional-write-unsupported
+                                    :operation :multi-dissoc})))
                  (if (empty? store-keys)
                    {}
                    (jdbc/with-transaction [tx connection]
@@ -566,7 +793,7 @@
                     (assoc db-spec :dbtype (:subprotocol db-spec)))
           db-spec (assoc db-spec :sync? (:sync? complete-opts))
           ^PooledDataSource connection (get-connection db-spec)
-          backing (JDBCTable. db-spec connection table)
+          backing (JDBCTable. db-spec connection table (atom {}))
           ;; `:config` IS forwarded now. It used to be dissoc'd, so the
           ;; literal above always won and compression and encryption could not
           ;; be configured at all -- the blob header carried a 0 whatever was
@@ -583,6 +810,25 @@
           ;; warning on every connect whatever the caller passed, and filling
           ;; first would let it occupy the slot and silently drop a caller's
           ;; older spelling.
+          _ (when (false? (:in-place? (:config params)))
+              ;; Refused rather than honoured, because this backing cannot do it.
+              ;; The layout writes `<key>.new` and then renames it over `<key>`,
+              ;; but `-atomic-move` is `UPDATE ... SET id = ?` and the primary key
+              ;; refuses that whenever the destination row still exists — so the
+              ;; SECOND write to any key fails. Measured on Postgres: create ok,
+              ;; overwrite `duplicate key value violates unique constraint`.
+              ;;
+              ;; It also breaks the fence. The metadata a conditional write
+              ;; compares is remembered under the real key, so a write aimed at
+              ;; `<key>.new` finds none, takes create-if-absent, and the rename
+              ;; that follows is unconditional — nothing compares anything. Left
+              ;; reachable, that is a silent lost update in a configuration that
+              ;; was already broken for ordinary writes.
+              (throw (ex-info (str ":in-place? false is not supported by konserve-jdbc. A row is "
+                                   "updated in place; the rename this layout needs collides with "
+                                   "the primary key, and a conditional write could not be fenced.")
+                              {:type :konserve.jdbc/unsupported-config
+                               :config (:config params)})))
           config (-> (dissoc params :opts :config)
                      (assoc :config (merge {:sync-blob? true
                                             :in-place? true
@@ -610,7 +856,7 @@
   (let [complete-opts (merge {:sync? true} opts)
         table (or table (:table db-spec) default-table)
         connection (jdbc/get-connection (prepare-spec db-spec))
-        backing (JDBCTable. db-spec connection table)]
+        backing (JDBCTable. db-spec connection table (atom {}))]
     (-delete-store backing complete-opts)))
 
 ;; =============================================================================

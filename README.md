@@ -209,6 +209,77 @@ This backend supports atomic multi-key operations (`multi-assoc`, `multi-get`, `
 
 **Transaction Support**: All operations are wrapped in JDBC transactions for atomicity. Uses bulk INSERT/UPSERT statements for efficient writes. Connection pooling via c3p0 is used by default for concurrent access. Database-specific SQL syntax is handled automatically.
 
+## Conditional Writes
+
+Two processes that read the same key and then both write it will, by default,
+leave whichever wrote last — the other update is gone, and neither writer is
+told. Passing `:expected-revision` makes the write conditional on the key still
+holding what was read:
+
+``` clojure
+(require '[konserve.core :as k])
+
+(let [[value revision] (k/get store :head nil {:sync? true :with-revision? true})]
+  (k/assoc store :head (update value :n inc)
+           {:sync? true :expected-revision revision}))
+;; => throws ex-info with {:type :konserve/revision-mismatch} if someone else
+;;    committed in between; re-read and retry.
+```
+
+`konserve.core/absent` as the expected revision means *create it only if it does
+not exist*.
+
+The comparison is made by the database, in the same statement as the write:
+
+``` sql
+UPDATE konserve SET header = ?, meta = ?, val = ? WHERE id = ? AND meta = ?
+```
+
+If no row matches, nothing was written and the caller is told. Create-if-absent
+is a plain `INSERT` refused by the primary key. There is no version column and
+no schema change — an existing table works as it is.
+
+**How far the fence reaches** depends on the database, not on this library, and
+konserve exposes that as the store's conditional-write domain:
+
+| Database | Domain | Orders writers |
+|---|---|---|
+| PostgreSQL, YugabyteDB, MySQL, SQL Server | `:global` | anywhere that can reach the server |
+| H2 over `tcp://` or `ssl://` | `:global` | anywhere that can reach the server |
+| SQLite, file-based H2 | `:machine` | processes on the host holding the file |
+| H2 `mem:`, SQLite `:memory:` | `:process` | one runtime |
+
+The domain is read from the deployment, not just the `:dbtype`, because one
+dbtype spells three different things: an embedded H2 file orders every process
+on the host, an H2 `mem:` database is invisible to the process next door, and an
+H2 server orders writers anywhere on the network.
+
+A `:dbtype` this backend does not recognise gets no domain, and
+`:expected-revision` is refused rather than silently ignored. SQLite over a
+network filesystem is `:machine` at best — its own documentation calls locking
+there unreliable.
+
+### Limits
+
+- **Existing keys must be written once before they can be fenced.** The revision
+  lives in konserve's metadata and was introduced with this feature, so a key
+  last written by an older release has none. Fencing it raises
+  `:konserve/revision-unavailable` — a deliberate refusal rather than a guessed
+  "unchanged". One ordinary write gives the key a revision; the table itself
+  needs no migration.
+- **Binary values cannot be fenced.** `konserve.core/bassoc` refuses
+  `:expected-revision` in konserve itself, so a pointer stored with `bassoc` gets
+  no fencing on any backend.
+- **Multi-key operations cannot be fenced.** `multi-assoc` and `multi-dissoc`
+  both refuse the option; there is nothing coherent to compare across a batch.
+- **`:config {:in-place? false}` is refused at connect time.** That layout writes
+  `<key>.new` and renames it into place, but a rename here is `UPDATE ... SET id`
+  and the primary key rejects it whenever the destination exists — so the second
+  write to any key failed, with or without fencing. It is now an error rather
+  than a surprise.
+- **`:jdbcUrl` with H2 does not work** (pre-existing): `connection/uri->db-spec`
+  returns no `:dbtype` for `jdbc:h2:` URLs. Use `:dbtype "h2"` with `:dbname`.
+
 ## Supported Databases
 
 **BREAKING CHANGE**: konserve-jdbc versions after `0.1.79` no longer include
