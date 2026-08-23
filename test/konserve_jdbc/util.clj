@@ -4,6 +4,8 @@
             [konserve.compliance-test :as ct]
             [konserve-jdbc.core :as core]
             [next.jdbc :as jdbc]
+            [next.jdbc.result-set :as rs]
+            [konserve.impl.storage-layout :as sl]
             [clojure.core.async :refer [<!!]]
             [clojure.test :refer [is]])
   (:import  [java.io File]))
@@ -398,7 +400,14 @@
    overtook it and land on top.
 
    Deterministic, not a race: the conditional write is parked inside its `up-fn`,
-   which runs after konserve's revision check and before the row is synced."
+   which runs after konserve's revision check and before the row is synced.
+
+   SCOPE, since it changed: konserve 0.9.377 refuses `:expected-revision` on
+   `multi-get` itself (konserve#175), so on that version and later this exercises
+   the pair — and it passes even with the backing's own gate removed, which is
+   measured, not assumed. What still proves the gate is
+   `test-only-a-fenced-write-deposits`. This one is kept because two independent
+   refusals are the point: the backing must not depend on konserve's."
   [connect! release!]
   (let [a (connect!)
         b (connect!)
@@ -432,3 +441,39 @@
             "the value that committed in between must survive"))
       (finally
         (doseq [s [a b]] (try (release! s) (catch Exception _ nil)))))))
+
+(defn test-only-a-fenced-write-deposits
+  "The backing's own gate, driven directly.
+
+   The metadata a conditional write compares against is remembered by the read
+   konserve takes under the lock. Which reads may deposit is the whole safety
+   property: a read that is not part of a conditional write must leave nothing
+   behind, or some later write consumes it and compares against the wrong bytes.
+
+   Driven at the protocol level rather than through `k/multi-get`, because
+   konserve now refuses that option on reads before the backing ever sees it
+   (konserve#175) — so the end-to-end route can no longer reach this code, and a
+   test that goes through it would pass with the gate deleted. The second
+   assertion is what keeps this one honest: the same call with a WRITE operation
+   must deposit, proving the path being exercised is the real one."
+  [connect! release!]
+  (let [store (connect!)
+        backing (:backing store)]
+    (try
+      (k/assoc store :deposit-probe {:v 1} {:sync? true})
+      (let [store-key (-> (jdbc/execute! (:connection backing)
+                                         [(str "SELECT id FROM " (:table backing))]
+                                         {:builder-fn rs/as-unqualified-lower-maps})
+                          first
+                          :id)
+            deposits (fn [env]
+                       (reset! (:read-cache backing) {})
+                       (let [blob (sl/-create-blob backing store-key env)]
+                         (sl/-read-header blob env)
+                         @(:read-cache backing)))]
+        (is (some? store-key) "the probe row must exist for this to test anything")
+        (is (empty? (deposits {:sync? true :expected-revision :x :operation :read-edn}))
+            "a READ carrying the option must leave nothing for a later write to consume")
+        (is (seq (deposits {:sync? true :expected-revision :x :operation :write-edn}))
+            "and the read belonging to a conditional WRITE must deposit, or the fence has nothing to compare"))
+      (finally (try (release! store) (catch Exception _ nil))))))

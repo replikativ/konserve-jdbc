@@ -14,6 +14,7 @@
                                         test-comparison-is-byte-exact
                                         test-enumeration-does-not-break-fenced-writes
                                         test-multi-read-cannot-poison-a-fenced-write
+                                        test-only-a-fenced-write-deposits
                                         default-num-keys]])
   (:import [java.util UUID]))
 
@@ -147,4 +148,12 @@
     (testing "A multi-read cannot redirect a fenced write on Postgres"
       (test-multi-read-cannot-poison-a-fenced-write #(store/connect-store spec {:sync? true})
                                                     #(release % {:sync? true})))
+    (store/delete-store spec {:sync? true})))
+
+(deftest jdbc-deposit-gate-test
+  (let [spec (assoc db-spec :table "deposit_gate_test")
+        _ (store/delete-store spec {:sync? true})]
+    (testing "Only a conditional write's own read deposits metadata on Postgres"
+      (test-only-a-fenced-write-deposits #(store/connect-store spec {:sync? true})
+                                         #(release % {:sync? true})))
     (store/delete-store spec {:sync? true})))
