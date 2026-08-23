@@ -163,7 +163,7 @@ Operations exceeding batch limits are **automatically batched** within a single 
 
 - All operations are wrapped in JDBC transactions for atomicity (all-or-nothing)
 - Uses bulk INSERT/UPSERT statements for efficient writes
-- Connection pooling via c3p0 is used by default for concurrent access
+- Connection pooling via c3p0 is used by default for concurrent access; pools are shared per database and reference counted (see [Connection Pools and Multi-tenancy](#connection-pools-and-multi-tenancy))
 - Database-specific SQL syntax is handled automatically (MERGE, ON CONFLICT, REPLACE, etc.)
 
 (def store-a (k/create-store store-a-config {:sync? true}))
@@ -279,6 +279,50 @@ there unreliable.
   than a surprise.
 - **`:jdbcUrl` with H2 does not work** (pre-existing): `connection/uri->db-spec`
   returns no `:dbtype` for `jdbc:h2:` URLs. Use `:dbtype "h2"` with `:dbname`.
+
+## Connection Pools and Multi-tenancy
+
+Pools are keyed by **connection**, not by table: every store on the same
+database — every tenant, whatever its `:table` — shares one c3p0 pool. A
+thousand tenants on one Postgres means one pool, not a thousand.
+
+Because the pool is shared, it is reference counted. `connect-store` takes a
+reference, `release` gives one back, and the pool is closed only when the last
+store using it has been released:
+
+```clojure
+(require '[konserve-jdbc.core :as kjdbc])
+
+(def a (k/connect-store (assoc config :table "tenant_a") {:sync? true}))
+(def b (k/connect-store (assoc config :table "tenant_b") {:sync? true}))
+
+(kjdbc/release a {:sync? true})   ;=> :retained  -- b still holds the pool
+(kjdbc/release a {:sync? true})   ;=> :already-released
+(kjdbc/release b {:sync? true})   ;=> :closed
+```
+
+`release` returns `:closed`, `:retained`, `:already-released`, `:absent` or
+`:stale` (the pool this store was opened against was closed out of band and
+rebuilt; nothing is closed), and is idempotent per store. `{:force? true}` in the options closes the shared pool
+regardless of who else is using it — the pre-refcount behaviour, appropriate at
+process shutdown and nowhere else. `delete-store` uses a connection of its own,
+so dropping one tenant's table never disturbs another's store.
+
+**Pool sizing.** c3p0 setters can be passed in the store config and are applied
+when the pool is built: `:maxPoolSize`, `:minPoolSize`, `:initialPoolSize`,
+`:acquireIncrement`, `:checkoutTimeout`, `:maxIdleTime`, `:maxStatements`,
+`:numHelperThreads`. They are not part of the pool key, so the first store to
+reach a database sets them for everyone sharing it; a later store asking for
+different values is logged and ignored. Set `:checkoutTimeout` — c3p0's default
+of `0` waits for a connection forever.
+
+**Introspection and recovery.** `(konserve-jdbc.core/pool-status)` returns a
+credential-free snapshot of the registry (`:refs`, `:open?`, `:db-spec`).
+`remove-from-pool` forgets a pool without closing it, so the next
+`connect-store` builds a fresh one while existing stores keep working; passing
+`:validate-pool? true` in the config makes `connect-store` probe an existing
+pool and rebuild it if something closed it out of band, at the cost of one
+connection checkout per connect.
 
 ## Supported Databases
 

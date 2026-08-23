@@ -12,7 +12,13 @@
                               org.apache.derby/derby {:mvn/version "10.16.1.1"}
                               org.postgresql/postgresql {:mvn/version "42.6.0"}
                               org.xerial/sqlite-jdbc {:mvn/version "3.41.2.2"}}}
-           :test {:extra-deps {lambdaisland/kaocha {:mvn/version "1.83.1314"}}
+           :test {:extra-deps {lambdaisland/kaocha {:mvn/version "1.83.1314"}
+                               ;; downstream consumer, for the multi-tenant test:
+                               ;; datahike's create-database/delete-database
+                               ;; release their store when done, which is what
+                               ;; used to close the pool under every other tenant
+                               org.replikativ/datahike {:mvn/version "0.8.1790"
+                                                        :exclusions [org.replikativ/konserve]}}
                   :extra-paths ["test"]
                   #_#_:main-opts ["-m" "kaocha.runner"]}
            :format {:extra-deps {cljfmt/cljfmt {:mvn/version "0.9.2"}}
