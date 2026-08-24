@@ -27,30 +27,297 @@
 (def ^:const dbtypes ["h2" "h2:mem" "hsqldb" "jtds:sqlserver" "mysql" "oracle:oci" "oracle:thin" "postgresql" "redshift" "sqlite" "sqlserver" "mssql" "yugabytedb"])
 (def ^:const supported-dbtypes #{"h2" "mysql" "postgresql" "sqlite" "sqlserver" "mssql" "yugabytedb"})
 
-;; this is the link to the various connection pools
-(defonce pool (atom nil))
+;; ---------------------------------------------------------------------------
+;; Connection pools
+;;
+;; One c3p0 pool per unique connection spec, shared by every store that speaks
+;; to that database. The pool key deliberately ignores `:table`: two stores on
+;; two tables of the same database should share connections, and a
+;; store-per-tenant deployment would otherwise open a pool per tenant -- a
+;; thousand tenants would mean a thousand pools and (at c3p0's default
+;; `minPoolSize` of 3) three thousand idle connections against a server whose
+;; default `max_connections` is 100.
+;;
+;; Sharing means the pool cannot belong to any single store, so it is reference
+;; counted. `connect-store` (via `get-connection`) takes a reference and
+;; `release` gives one back; the DataSource is only closed when the last holder
+;; lets go. Before this, `release` closed the pool outright and every other
+;; store on the same database was left holding a dead DataSource -- a
+;; `delete-store` (or datahike's `create-database`/`delete-database`, which
+;; release the store when done) on one tenant took every other tenant on that
+;; server down with it.
+;;
+;; Two things deliberately happen *outside* the registry lock, because both can
+;; block for a long time and would otherwise serialise every connecting thread:
+;; building a pool (a real JDBC handshake -- hence the per-key delay) and
+;; probing one for liveness (a checkout, which on an exhausted pool with c3p0's
+;; default `checkoutTimeout` of 0 waits forever -- hence opt-in).
+;; ---------------------------------------------------------------------------
 
-;; each unique spec will have its own pool
+;; pool key -> {:pool (delay {:datasource ds :hook thread}) :refs n :db-spec spec}
+(defonce pool (atom {}))
+
+;; pool token -> entry. `remove-from-pool` moves an active generation here so
+;; its existing holders can continue using it and, importantly, can eventually
+;; close it. A replacement generation can be active under the same pool key at
+;; the same time.
+(defonce ^:private retired-pools (atom {}))
+
+;; Guards registry mutation only: map lookups and refcount arithmetic, never a
+;; database round trip.
+(defonce ^:private pool-lock (Object.))
+
+;; c3p0 sizing knobs are not part of the pool key, so the first store to reach a
+;; database decides them for everyone sharing it. We warn when a later spec
+;; disagrees rather than silently ignoring it.
+(def ^:private pool-config-keys
+  [:maxPoolSize :minPoolSize :initialPoolSize :acquireIncrement
+   :checkoutTimeout :maxIdleTime :maxStatements :numHelperThreads])
+
+(defn- redact-jdbc-url [url]
+  (some-> url
+          ;; URI user-info, e.g. //alice:secret@host or //alice@host
+          (str/replace #"(?i)(//)[^/@]+@" "$1<redacted>@")
+          ;; Common query-string and semicolon-separated JDBC properties.
+          (str/replace #"(?i)([?;&](?:user|username|password|passwd|pwd|access[_-]?token)=)[^;&]*"
+                       "$1<redacted>")))
+
+(defn- diagnostic-spec
+  "Credential-free subset of a db spec suitable for status output and logs."
+  [db-spec]
+  (cond-> (select-keys db-spec
+                       (into [:dbtype :jdbcUrl :host :port :dbname :classname]
+                             pool-config-keys))
+    (:jdbcUrl db-spec) (update :jdbcUrl redact-jdbc-url)))
+
+;; Each unique connection will have its own pool. `:sync?` is deliberately not
+;; part of the key: it changes nothing about how c3p0 talks to the database, and
+;; keying on it gave one database two pools as soon as a caller mixed sync and
+;; async stores -- and made `release-pool!`/`remove-from-pool` miss the pool
+;; when handed the caller's own spec, which `connect-store` never saw with
+;; `:sync?` on it.
 (defn- pool-key [db-spec]
   (keyword
-   (str (hasch/uuid  (select-keys db-spec [:dbtype :jdbcUrl :host :port :user :password :dbname :sync?])))))
+   (str (hasch/uuid  (select-keys db-spec [:dbtype :jdbcUrl :host :port :user :password :dbname])))))
 
-(defn get-connection [db-spec]
+(defn- build-pool
+  "Open a c3p0 pool for `db-spec`. Called at most once per registry entry, from
+   inside the entry's delay."
+  [db-spec]
+  (let [ds ^PooledDataSource (connection/->pool ComboPooledDataSource db-spec)]
+    (try
+      ;; fail fast on a bad spec rather than at first use
+      (.close (jdbc/get-connection ds))
+      (let [hook (Thread. ^Runnable (fn [] (.close ds)))]
+        (.addShutdownHook (Runtime/getRuntime) hook)
+        {:datasource ds :hook hook})
+      (catch Throwable t
+        ;; `connection/->pool` registers the datasource with c3p0 before the
+        ;; first checkout. Without this close, every failed retry leaves a
+        ;; datasource and its helper threads reachable from C3P0Registry.
+        (try
+          (.close ds)
+          (catch Throwable close-error
+            (.addSuppressed t close-error)))
+        (throw t)))))
+
+(defn- close-pool-entry!
+  "Close the DataSource behind a registry entry and drop its shutdown hook.
+   Never forces an unrealized delay: a pool that was never built has nothing to
+   close."
+  [{:keys [pool] :as _entry}]
+  (when (and pool (realized? pool))
+    (let [{:keys [^PooledDataSource datasource ^Thread hook]} @pool]
+      (when hook
+        (try
+          (.removeShutdownHook (Runtime/getRuntime) hook)
+          ;; the JVM is already shutting down; the hook is running or about to
+          (catch IllegalStateException _e nil)))
+      (when datasource
+        (try
+          (.close datasource)
+          (catch Exception e
+            (log/warn :konserve.jdbc/pool-close-failed {:error e})))))))
+
+(defn- probe-pool
+  "Liveness probe: check a connection out of the pool and hand it straight back.
+   A pool closed out of band (a shutdown hook, a `release` with `:force?`, an
+   older konserve-jdbc closing it under us) throws here. Runs outside
+   `pool-lock` -- a checkout can block."
+  [^PooledDataSource ds]
+  (try
+    (.close (jdbc/get-connection ds))
+    nil
+    (catch Exception e e)))
+
+(defn- warn-on-config-drift! [id existing-spec db-spec]
+  (let [drift (into {}
+                    (keep (fn [k]
+                            (let [want (get db-spec k)
+                                  have (get existing-spec k)]
+                              (when (and (some? want) (not= want have))
+                                [k {:requested want :in-use have}]))))
+                    pool-config-keys)]
+    (when (seq drift)
+      (log/warn :konserve.jdbc/pool-config-ignored
+                {:pool id
+                 :ignored drift
+                 :reason "pool already open; sizing is set by the first store to connect"}))))
+
+(defn- take-reference!
+  "Install a registry entry for `db-spec` if there is none and add one reference
+   to it. Returns the entry; the caller derefs its `:pool` outside the lock."
+  [id db-spec]
+  (locking pool-lock
+    (let [existing (get @pool id)
+          ;; recorded for diagnostics and drift warnings: no credentials, and
+          ;; nothing store-specific -- the pool is shared across tables and
+          ;; sync/async stores alike, so the first connector's `:table` or
+          ;; `:sync?` would be misleading in `pool-status`
+          entry (or existing {:pool (delay (build-pool db-spec))
+                              :refs 0
+                              :db-spec (diagnostic-spec db-spec)})]
+      (when existing
+        (warn-on-config-drift! id (:db-spec existing) db-spec))
+      (let [entry (update entry :refs inc)]
+        (swap! pool assoc id entry)
+        entry))))
+
+(defn- drop-reference!
+  "Undo a `take-reference!` whose pool failed to build, so one bad spec does not
+   poison the key for later callers. The entry is forgotten outright, whatever
+   its count: a delay that threw will throw for every holder, so none of them
+   has a pool to give back and each will drop the same entry on its way out."
+  [id entry]
+  (locking pool-lock
+    (when (identical? (:pool (get @pool id)) (:pool entry))
+      (swap! pool dissoc id))
+    (swap! retired-pools dissoc (:pool entry))))
+
+(defn- acquire-pool
+  "Like `get-connection`, but returns `[datasource pool-token]`. The token
+   identifies the registry entry the reference was taken against, so a later
+   release can tell whether it still refers to the same pool (see `release`)."
+  ([db-spec] (acquire-pool db-spec 0))
+  ([db-spec attempt]
+   (let [id (pool-key db-spec)
+         entry (take-reference! id db-spec)
+         {:keys [datasource]} (try
+                                @(:pool entry)
+                                (catch Throwable t
+                                  (drop-reference! id entry)
+                                  (throw t)))]
+     (if-let [probe-error (and (:validate-pool? db-spec)
+                               (probe-pool datasource))]
+       ;; The pool was closed under us. Drop the dead entry -- other holders are
+       ;; holding the same dead DataSource -- and build a fresh one. One retry:
+       ;; a pool that dies twice in a row is a broken database, not a stale
+       ;; registry, and the caller should see that error rather than receive the
+       ;; DataSource we just closed.
+       (do
+         (log/warn :konserve.jdbc/pool-closed-out-of-band
+                   {:pool id :refs (:refs entry) :attempt attempt})
+         (locking pool-lock
+           (when (identical? (:pool (get @pool id)) (:pool entry))
+             (swap! pool dissoc id))
+           (swap! retired-pools dissoc (:pool entry)))
+         (close-pool-entry! entry)
+         (if (zero? attempt)
+           (recur db-spec (inc attempt))
+           (throw (ex-info "JDBC pool failed its liveness probe after being rebuilt."
+                           {:type :konserve.jdbc/pool-validation-failed
+                            :pool id
+                            :attempt attempt}
+                           probe-error))))
+       [datasource (:pool entry)]))))
+
+(defn get-connection
+  "Return the pooled DataSource for `db-spec`, opening it if needed, and take a
+   reference to it. Every call must be paired with a `release` (or
+   `release-pool!`), or the pool is never closed.
+
+   With `:validate-pool? true` in the spec, an already-open pool is probed
+   before it is handed out and rebuilt if it has been closed out of band. The
+   probe costs a connection checkout per connect, so it is off by default."
+  [db-spec]
+  (first (acquire-pool db-spec)))
+
+(defn release-pool!
+  "Give back one reference to the pool for `db-spec`. Closes and forgets the
+   pool when the last reference goes. Returns `:closed`, `:retained` or
+   `:absent`.
+
+   `:force? true` closes the pool no matter how many stores still hold it. That
+   is the old, unconditional behaviour -- a footgun on a shared database, and
+   only appropriate when shutting the whole process down.
+
+   `:token` is the token `acquire-pool` handed out with the reference. It makes
+   releases generation-safe: a holder of a retired pool decrements that retired
+   generation, never the replacement active under the same key. `:stale` means
+   the referenced generation has already been forcibly closed."
+  [db-spec & {:keys [force? token]}]
   (let [id (pool-key db-spec)
-        conn (get @pool id)]
-    (if-not (nil? conn)
-      conn
-      (let [conns ^PooledDataSource (connection/->pool ComboPooledDataSource db-spec)
-            shutdown (fn [] (.close ^PooledDataSource conns))]
-        (swap! pool assoc id conns)
-        (.close (jdbc/get-connection conns))
-        (.addShutdownHook (Runtime/getRuntime)
-                          (Thread. ^Runnable shutdown))
-        conns))))
+        [result entry]
+        (locking pool-lock
+          (let [active (get @pool id)
+                [location entry]
+                (cond
+                  (or (nil? token)
+                      (identical? token (:pool active))) [:active active]
+                  :else [:retired (get @retired-pools token)])]
+            (cond
+              (nil? entry) [(if token :stale :absent) nil]
 
-(defn remove-from-pool [db-spec]
-  (let [id (pool-key db-spec)]
-    (swap! pool dissoc id)))
+              (or force? (<= (:refs entry) 1))
+              (do
+                (if (= :active location)
+                  (swap! pool dissoc id)
+                  (swap! retired-pools dissoc token))
+                [:closed entry])
+
+              :else
+              (do
+                (if (= :active location)
+                  (swap! pool update-in [id :refs] dec)
+                  (swap! retired-pools update-in [token :refs] dec))
+                [:retained nil]))))]
+    ;; closing can block, so it happens after the lock is dropped
+    (when entry (close-pool-entry! entry))
+    result))
+
+(defn remove-from-pool
+  "Retire the active pool for `db-spec` without interrupting its holders, so the
+   next `connect-store` builds a fresh generation. The retired pool remains
+   reference counted and closes when its final original holder releases it."
+  [db-spec]
+  (locking pool-lock
+    (let [id (pool-key db-spec)]
+      (when-let [entry (get @pool id)]
+        (swap! pool dissoc id)
+        (swap! retired-pools assoc (:pool entry) (assoc entry :id id))))
+    nil))
+
+(defn pool-status
+  "Registry snapshot for diagnostics and tests: pool key -> {:refs n :open? bool
+   :db-spec spec}, with credentials stripped. Never returns the DataSource
+   itself."
+  []
+  (into {}
+        (map (fn [[id {:keys [refs db-spec] :as entry}]]
+               [id {:refs refs
+                    :open? (boolean (some-> (:pool entry) realized?))
+                    :db-spec db-spec}]))
+        @pool))
+
+(defn retired-pool-status
+  "Credential-free snapshot of pool generations retired by `remove-from-pool`."
+  []
+  (mapv (fn [{:keys [id refs db-spec] :as entry}]
+          {:pool id
+           :refs refs
+           :open? (boolean (some-> (:pool entry) realized?))
+           :db-spec db-spec})
+        (vals @retired-pools)))
 
 (defn extract-bytes [obj dbtype]
   (when obj
@@ -525,6 +792,12 @@
       "sqlite" (if (str/starts-with? name* ":memory:") :process :machine)
       (get server-conditional-write-domains dbtype))))
 
+;; Per-store lifecycle state lives in the record's *metadata* under `:state`,
+;; not in a further field. The atom carries `:released?` -- so a second
+;; `release` of the same store cannot hand back a reference it no longer
+;; holds -- and `:pool`, the registry token the store's reference was taken
+;; against (see `release-pool!`). Absent for backings built by hand, which then
+;; release without the stale check.
 (defrecord JDBCTable [db-spec connection table read-cache]
   ;; The database evaluates the comparison — one statement, atomic on its own — so
   ;; konserve adds no mechanism of its own: no sidecar row, no lock. Declared
@@ -589,8 +862,17 @@
     (if (:sync? env) nil (go-try- nil)))
   (-delete-store [_ env]
     (async+sync (:sync? env) *default-sync-translation*
-                (go-try- (jdbc/execute! connection (delete-statement (:dbtype db-spec) table))
-                         (.close ^Connection connection))))
+                (go-try- (try
+                           (jdbc/execute! connection (delete-statement (:dbtype db-spec) table))
+                           (finally
+                             ;; Only a connection this store owns outright gets
+                             ;; closed, and it is closed even when the DROP
+                             ;; fails. When the backing holds a pooled DataSource
+                             ;; it is shared with every other store on this
+                             ;; database -- closing it here would take them all
+                             ;; down, and `release` is the way to hand it back.
+                             (when (instance? Connection connection)
+                               (.close ^Connection connection)))))))
   (-keys [_ env]
     (async+sync (:sync? env) *default-sync-translation*
                 (go-try-
@@ -792,24 +1074,9 @@
                     db-spec
                     (assoc db-spec :dbtype (:subprotocol db-spec)))
           db-spec (assoc db-spec :sync? (:sync? complete-opts))
-          ^PooledDataSource connection (get-connection db-spec)
-          backing (JDBCTable. db-spec connection table (atom {}))
-          ;; `:config` IS forwarded now. It used to be dissoc'd, so the
-          ;; literal above always won and compression and encryption could not
-          ;; be configured at all -- the blob header carried a 0 whatever was
-          ;; asked for. Merged onto the defaults, so a partial `:config` keeps
-          ;; the rest.
-          ;;
-          ;; `:compressor null-compressor` / `:encryptor null-encryptor` are
-          ;; gone: `connect-default-store` has never read them, taking both
-          ;; from `(get-in config [:compressor :type])`. Dead keys that made a
-          ;; top-level spelling look supported.
-          ;;
-          ;; Normalised BEFORE our serializer default is filled: emitting
-          ;; `:default-serializer` would trip konserve 0.9.369's deprecation
-          ;; warning on every connect whatever the caller passed, and filling
-          ;; first would let it occupy the slot and silently drop a caller's
-          ;; older spelling.
+          ;; Config is refused BEFORE a pool reference is taken: a throw past
+          ;; this point has to hand the reference back, and this one does not
+          ;; need one in the first place.
           _ (when (false? (:in-place? (:config params)))
               ;; Refused rather than honoured, because this backing cannot do it.
               ;; The layout writes `<key>.new` and then renames it over `<key>`,
@@ -829,6 +1096,25 @@
                                    "the primary key, and a conditional write could not be fenced.")
                               {:type :konserve.jdbc/unsupported-config
                                :config (:config params)})))
+          [^PooledDataSource connection pool-token] (acquire-pool db-spec)
+          backing (with-meta (JDBCTable. db-spec connection table (atom {}))
+                    {:state (atom {:released? false :pool pool-token})})
+          ;; `:config` IS forwarded now. It used to be dissoc'd, so the
+          ;; literal above always won and compression and encryption could not
+          ;; be configured at all -- the blob header carried a 0 whatever was
+          ;; asked for. Merged onto the defaults, so a partial `:config` keeps
+          ;; the rest.
+          ;;
+          ;; `:compressor null-compressor` / `:encryptor null-encryptor` are
+          ;; gone: `connect-default-store` has never read them, taking both
+          ;; from `(get-in config [:compressor :type])`. Dead keys that made a
+          ;; top-level spelling look supported.
+          ;;
+          ;; Normalised BEFORE our serializer default is filled: emitting
+          ;; `:default-serializer` would trip konserve 0.9.369's deprecation
+          ;; warning on every connect whatever the caller passed, and filling
+          ;; first would let it occupy the slot and silently drop a caller's
+          ;; older spelling.
           config (-> (dissoc params :opts :config)
                      (assoc :config (merge {:sync-blob? true
                                             :in-place? true
@@ -840,23 +1126,58 @@
                                 #(merge {:serializer :FressianSerializer} %))
                      (update :buffer-size #(or % (* 1024 1024)))
                      (assoc :opts complete-opts))]
-      (connect-default-store backing config))))
+      ;; The reference was taken above; if building the store on top of it
+      ;; fails, hand it straight back. Otherwise every failed connect -- a bad
+      ;; table name, a privilege error, a retry loop against a flaky database --
+      ;; pins the shared pool open with a reference nobody can release.
+      (try
+        (connect-default-store backing config)
+        (catch Throwable t
+          (release-pool! db-spec :token pool-token)
+          (throw t))))))
 
 (def connect-jdbc-store connect-store) ;; this is the new standard approach for store. Old signature remains for backwards compatability. 
 
 (defn release
-  "Must be called after work on database has finished in order to close connection"
+  "Hand back this store's reference to its connection pool. Must be called when
+   work on the store has finished.
+
+   The pool is shared with every other store on the same database, so it is only
+   closed once the last store using it has been released. Returns `:closed`,
+   `:retained`, `:absent`, `:already-released` or `:stale` (the pool this store
+   was opened against has since been closed out of band and rebuilt; the
+   store's reference no longer counts and nothing is closed).
+
+   `{:force? true}` in `env` closes the shared pool regardless of who else is
+   using it -- the pre-refcount behaviour, appropriate at process shutdown and
+   nowhere else."
   [store env]
   (async+sync (:sync? env) *default-sync-translation*
               (go-try-
-               (.close ^PooledDataSource (:connection ^JDBCTable (:backing store)))
-               (remove-from-pool (:db-spec ^JDBCTable (:backing store))))))
+               (let [backing ^JDBCTable (:backing store)
+                     state (:state (meta backing))
+                     ;; claim the release: only the first caller gives the
+                     ;; reference back, however often `release` is called
+                     already? (when state
+                                (:released? (first (swap-vals! state assoc :released? true))))]
+                 (if already?
+                   :already-released
+                   (release-pool! (:db-spec backing)
+                                  :force? (:force? env)
+                                  :token (some-> state deref :pool)))))))
 
-(defn delete-store [db-spec & {:keys [table opts]}]
+(defn delete-store
+  "Drop the store's table. Uses a connection of its own rather than the shared
+   pool, so deleting one tenant's store leaves every other store on the database
+   untouched."
+  [db-spec & {:keys [table opts]}]
   (let [complete-opts (merge {:sync? true} opts)
         table (or table (:table db-spec) default-table)
-        connection (jdbc/get-connection (prepare-spec db-spec))
-        backing (JDBCTable. db-spec connection table (atom {}))]
+        ;; the prepared spec, so `:jdbcUrl`-only callers get their dialect
+        ;; normalised (`postgres` -> `postgresql`) before the DROP is built
+        prepared (prepare-spec db-spec)
+        connection (jdbc/get-connection prepared)
+        backing (JDBCTable. prepared connection table (atom {}))]
     (-delete-store backing complete-opts)))
 
 ;; =============================================================================
