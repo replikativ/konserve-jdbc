@@ -53,9 +53,22 @@ For API usage (assoc-in, get-in, delete-store, etc.), see the [konserve document
 
 ## Multitenancy
 
-Multiple independent stores can be housed in the same database. Each store has:
-- `:id` - The virtual/global identifier for the store (required, UUID)
-- `:table` - The physical database table where data is stored (optional, defaults to "konserve")
+Multiple independent stores can be housed in the same database by giving each
+store its own table. Each store has:
+
+- `:id` - The logical/global identifier used by Konserve coordination
+  (required, UUID)
+- `:table` - The physical store boundary (optional, defaults to `"konserve"`)
+
+`:id` does **not** namespace rows inside a JDBC table. Two configurations that
+name the same database and table address the same bytes even when their IDs
+differ. Use the same ID for every connection to one table, and use a different
+table for every independent store. This is particularly important for
+blue/green deployments: each slot needs its own table.
+
+For the same reason, `store-exists?` answers whether the configured table
+exists. Changing only `:id` does not describe a new physical store and does not
+make `store-exists?` false.
 
 ``` clojure
 (def db  {:dbtype  "postgresql"
@@ -78,7 +91,7 @@ Multiple independent stores can be housed in the same database. Each store has:
     :table "app_b"
     :id #uuid "22222222-2222-2222-2222-222222222222"))
 
-;; Store C - uses default "konserve" table with different ID
+;; Store C - uses a third, default "konserve" table
 (def store-c-config
   (assoc db
     :backend :jdbc
@@ -171,7 +184,10 @@ Operations exceeding batch limits are **automatically batched** within a single 
 (def store-c (k/create-store store-c-config {:sync? true}))
 ```
 
-The `:id` is the authoritative virtual store identity used for global identification. The `:table` determines the physical storage location. Multiple stores can share the same table but must have different `:id` values.
+The `:id` is the logical identity used for global coordination. The `:table`
+determines the physical storage location and is the isolation boundary. Multiple
+connections may share a table only when they are connections to the same store;
+different IDs do not make one table hold independent stores.
 
 ## Implementation Details
 
