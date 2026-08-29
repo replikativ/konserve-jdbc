@@ -1198,7 +1198,11 @@
 
 (defmethod store/-store-exists? :jdbc
   [{:keys [dbtype table] :as config} opts]
-  ;; Check if the table exists by attempting to query it
+  ;; A JDBC table is the PHYSICAL store boundary, just as a directory is for the
+  ;; filestore. `:id` is Konserve's logical coordination identity; it does not
+  ;; namespace rows in this backend. Consequently existence is deliberately a
+  ;; property of the table, not of `:id`. Independent stores in one database
+  ;; need independent tables (README: Multitenancy).
   (async+sync (:sync? opts) *default-sync-translation*
               (go-try-
                (let [table (or table default-table)

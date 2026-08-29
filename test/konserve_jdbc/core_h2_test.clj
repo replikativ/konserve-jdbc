@@ -48,6 +48,29 @@
     (<!! (release store {:sync? false}))
     (<!! (store/delete-store spec {:sync? false}))))
 
+(deftest table-is-the-physical-store-boundary-test
+  (let [table "physical_identity_test"
+        a (assoc db-spec :table table
+                 :id #uuid "11111111-1111-1111-1111-111111111111")
+        b (assoc db-spec :table table
+                 :id #uuid "22222222-2222-2222-2222-222222222222")]
+    (store/delete-store a {:sync? true})
+    (is (false? (store/store-exists? a {:sync? true})))
+    (let [store-a (store/create-store a {:sync? true})]
+      (try
+        (k/assoc store-a :owner :a {:sync? true})
+        (is (true? (store/store-exists? b {:sync? true}))
+            "existence follows the table; changing only :id does not name new bytes")
+        (let [store-b (store/connect-store b {:sync? true})]
+          (try
+            (is (= :a (k/get store-b :owner nil {:sync? true}))
+                "different IDs do not partition one table")
+            (finally
+              (release store-b {:sync? true}))))
+        (finally
+          (release store-a {:sync? true})
+          (store/delete-store a {:sync? true}))))))
+
 (deftest jdbc-multi-operations-sync-test
   (let [spec (assoc db-spec :table "multi_test")
         _ (store/delete-store spec {:sync? true})
