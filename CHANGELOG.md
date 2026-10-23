@@ -4,6 +4,14 @@ All notable, user-visible changes to konserve-jdbc are documented here.
 
 ## Unreleased
 
+### Fixed
+- **Works with konserve 0.9.385+.** konserve now probes the backing's
+  `-store-exists?` on every connect and creates the store only when it is
+  missing; the JDBC backing did not implement it, so every `connect-store` /
+  `create-store` failed with `AbstractMethodError: JDBCTable._store_exists_QMARK_`.
+  The backing now answers it with the same table probe `store-exists?` uses.
+  Requires konserve `0.9.394`.
+
 ### Added
 - **Conditional writes (`:expected-revision`).** The backing implements konserve's
   `PConditionalWrite` and `PSelfConditionalWrite`: a fenced write is one
