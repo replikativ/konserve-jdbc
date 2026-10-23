@@ -6,6 +6,7 @@
             [konserve-jdbc.core :as jc :refer [release]]
             [konserve.core :as k]
             [konserve.store :as store]
+            [konserve.impl.storage-layout :as sl]
             [konserve-jdbc.util :refer [with-dir test-multi-operations-sync
                                         test-multi-operations-async
                                         test-conditional-writes
@@ -70,6 +71,29 @@
         (finally
           (release store-a {:sync? true})
           (store/delete-store a {:sync? true}))))))
+
+(deftest backing-answers-store-exists-test
+  (testing "the backing implements `-store-exists?`, which konserve >= 0.9.385
+            probes on every connect — without it every connect threw
+            AbstractMethodError"
+    (let [spec (assoc db-spec :table "backing_exists_test")]
+      (store/delete-store spec {:sync? true})
+      (let [st (store/create-store spec {:sync? true})]
+        (try
+          (k/assoc st :k 1 {:sync? true})
+          (is (true? (sl/-store-exists? (:backing st) {:sync? true})))
+          (is (true? (<!! (sl/-store-exists? (:backing st) {:sync? false}))))
+          (testing "and connecting to the existing store finds its data"
+            (let [again (store/connect-store spec {:sync? true})]
+              (try
+                (is (= 1 (k/get again :k nil {:sync? true})))
+                (finally (release again {:sync? true})))))
+          (store/delete-store spec {:sync? true})
+          (is (false? (sl/-store-exists? (:backing st) {:sync? true}))
+              "a dropped table is a missing store")
+          (finally
+            (release st {:sync? true})
+            (store/delete-store spec {:sync? true})))))))
 
 (deftest jdbc-multi-operations-sync-test
   (let [spec (assoc db-spec :table "multi_test")
