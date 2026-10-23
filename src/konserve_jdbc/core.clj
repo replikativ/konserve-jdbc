@@ -858,6 +858,19 @@
                                nil))]
                    (when (nil? res)
                      (jdbc/execute! connection (create-statement (:dbtype db-spec) table)))))))
+  ;; konserve >= 0.9.385 probes this on every connect (`connect-default-store`)
+  ;; and calls `-create-store` only for a store that is missing, so that
+  ;; connecting to an existing store writes nothing. Without it every connect
+  ;; failed with an AbstractMethodError. Same probe, and same meaning, as the
+  ;; `store/-store-exists?` method below: the table is the store.
+  (-store-exists? [_ env]
+    (async+sync (:sync? env) *default-sync-translation*
+                (go-try-
+                 (try
+                   (jdbc/execute! connection (table-exists-query (:dbtype db-spec) table))
+                   true
+                   (catch Exception _e
+                     false)))))
   (-sync-store [_ env]
     (if (:sync? env) nil (go-try- nil)))
   (-delete-store [_ env]
