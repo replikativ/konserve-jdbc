@@ -73,8 +73,12 @@
              (k/get-in store2 [:bar] nil {:sync? true})))
       (is (not= (k/get-in store2 [:bar] nil {:sync? true})
                 (k/get-in store3 [:bar] nil {:sync? true}))))
-    (release store {:sync? true})
-    (store/delete-store spec {:sync? true})))
+    ;; Every connect holds a reference on the shared pool. Releasing only the
+    ;; first left the pool open, and a later test asserting an empty pool
+    ;; registry failed, depending on the random test order.
+    (doseq [s [store store2 store3]] (release s {:sync? true}))
+    (store/delete-store spec {:sync? true})
+    (store/delete-store spec3 {:sync? true})))
 
 (deftest connect-jdbc-store-test
   (let [_ (delete-store jdbc-url :table "compliance_test" :opts {:sync? true})
